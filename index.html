@@ -84,6 +84,9 @@ nav{flex:1;overflow-y:auto;padding:10px 0}
 .badge.gn{border-color:var(--gn);color:var(--gn)}
 .badge.rd{border-color:var(--rd);color:var(--rd)}
 .badge.bl{border-color:var(--bl);color:var(--bl)}
+.badge.or{border-color:var(--or);color:var(--or)}
+.badge.tagbtn{cursor:pointer}
+.badge.tagbtn:hover{border-color:var(--or);color:var(--or)}
 .badge.am{border-color:var(--am);color:var(--am)}
 .group-head{display:flex;align-items:center;gap:10px;padding:8px 2px 6px;border-bottom:1px solid var(--bd);margin-bottom:10px}
 .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
@@ -282,6 +285,7 @@ const todayISO=()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMo
 const fmtD=iso=>{if(!iso)return'';const[y,m,d]=iso.slice(0,10).split('-');return`${d}/${m}/${y}`};
 const fmtMY=iso=>{const[y,m]=iso.slice(0,7).split('-');return['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m-1]+' '+y};
 const monthKey=iso=>iso.slice(0,7);
+const monthsBetweenKeys=(from,to)=>{const[a,b]=from.split('-').map(Number),[c,d]=to.split('-').map(Number);return (c-a)*12+(d-b)};
 const addDays=(iso,n)=>{const d=new Date(iso+'T00:00:00');d.setDate(d.getDate()+n);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')};
 const addMonths=(iso,n)=>{const d=new Date(iso+'T00:00:00');const day=d.getDate();d.setDate(1);d.setMonth(d.getMonth()+n);const last=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();d.setDate(Math.min(day,last));return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')};
 const daysBetween=(a,b)=>Math.round((new Date(b+'T00:00:00')-new Date(a+'T00:00:00'))/86400000);
@@ -379,7 +383,7 @@ function defaultCategories(){
 }
 const emptyState=()=>({
   ver:1, view:'dashboard',
-  settings:{payCycle:'fortnightly',billsAccountId:'',billsBuffer:0,billsRound:0,firstRun:true,textScale:100,apiKey:'',ghToken:'',gistId:'',alloc:{debt:70,goals:20,keep:10}},
+  settings:{payCycle:'fortnightly',billsAccountId:'',billsBuffer:0,billsRound:0,firstRun:true,textScale:100,apiKey:'',ghToken:'',gistId:'',alloc:{debt:70,goals:20,keep:10},spendMode:'auto',spendManual:0,spendMonths:3},
   accounts:[],transactions:[],categories:defaultCategories(),rules:[],recurring:[],incomes:[],
   bills:[],budgets:{},debts:[],scenarios:[],goals:[],snapshots:[],consol:{debtIds:[],rate:9,years:5,fees:0},syncMeta:{rev:0,ts:'',device:''}
 });
@@ -390,7 +394,8 @@ const ui={
   budgetMonth:monthKey(todayISO()), budgetMode:null,
   reportRange:{from:addMonths(todayISO(),-12),to:todayISO()}, reportCat:'',
   payoffSel:[], payoffOpen:{}, chartHidden:{}, wiz:null, debtOpen:{}, navCollapsed:window.innerWidth<760,
-  sensitivity:null, acctSort:'name', acctGroup:'institution', ai:null
+  sensitivity:null, acctSort:'name', acctGroup:'institution', ai:null,
+  billGroup:'catgroup', billSort:'weekly', billFilter:{q:'',freq:'',transfer:'',status:'active'}
 };
 const persist=debounce(()=>DB.put(JSON.parse(JSON.stringify(state))),250);
 function save(){persist();if(typeof SYNC!=='undefined'&&SYNC.enabled()){SYNC.dirty=true;SYNC.schedule()}}
@@ -402,6 +407,10 @@ function isAsset(a){return acctType(a).asset}
 function activeAccounts(){return state.accounts.filter(a=>!a.archived)}
 function catGroups(){const m=new Map();for(const c of state.categories){if(!m.has(c.group))m.set(c.group,[]);m.get(c.group).push(c)}return m}
 function catOptions(sel){let h='<option value="">\u2014 uncategorised \u2014</option>';for(const[g,cats]of catGroups()){h+=`<optgroup label="${esc(g)}">`+cats.map(c=>`<option value="${c.id}" ${c.id===sel?'selected':''}>${esc(c.name)}</option>`).join('')+'</optgroup>'}return h}
+function debtLabel(d){return `${d.name} - ${fmt0(d.balance)} @ ${d.rate||0}%`}
+function debtOptions(sel,noneLabel){
+  return `<option value="">${noneLabel||'- none -'}</option>`+state.debts.map(d=>`<option value="${d.id}" ${d.id===sel?'selected':''}>${esc(debtLabel(d))}</option>`).join('');
+}
 function acctOptions(sel,filter){let list=activeAccounts().filter(a=>!a.noTx||a.id===sel);if(filter)list=list.filter(filter);return '<option value="">\u2014 select \u2014</option>'+list.map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(a.name)}${a.noTx?' (valuation-only)':''}</option>`).join('')}
 
 /* ================================================================
@@ -472,6 +481,33 @@ const ENGINE={
       if(monthKey(t.date)!==mk)continue;
       out[t.categoryId||'_u']=(out[t.categoryId||'_u']||0)+t.amount;
     }
+    return out;
+  },
+  /* Bill-backed categories are billed in lumps (quarterly water, annual rego)
+     but budgeted at true monthly cost. Comparing a lump to one month's budget
+     always reads as a blowout, so each payment in such a category is amortised
+     across its bill's cycle from the month it landed. Others are untouched. */
+  billCycleMonths(b){
+    const m={weekly:1,fortnightly:1,monthly:1,quarterly:3,halfyearly:6,annually:12}[b.freq];
+    if(m)return m;
+    if(b.freq==='customN')return Math.max(1,Math.round((b.everyN||1)*7/30.44));
+    return 1;
+  },
+  monthActualsSmoothed(mk){
+    const cycle={};
+    for(const b of state.bills.filter(b=>b.active!==false)){
+      if(!b.categoryId)continue;
+      cycle[b.categoryId]=Math.max(cycle[b.categoryId]||1,ENGINE.billCycleMonths(b));
+    }
+    const out={};
+    for(const t of state.transactions){
+      const cid=t.categoryId||'_u';
+      const n=cycle[cid]||1;
+      if(n<=1){if(monthKey(t.date)===mk)out[cid]=(out[cid]||0)+t.amount;continue}
+      const idx=monthsBetweenKeys(monthKey(t.date),mk);
+      if(idx>=0&&idx<n)out[cid]=(out[cid]||0)+t.amount/n;
+    }
+    for(const k in out)out[k]=Math.round(out[k]);
     return out;
   },
   billBackedCats(){
@@ -578,35 +614,102 @@ const ENGINE={
   billsMonthly(){return Math.round(ENGINE.billsSummary().final*52/12)},
   minimumsMonthly(){return sum(state.debts.map(d=>Math.round(ENGINE.minMonthly(d))))},
   budgetSpendMonthly(){
-    // budgeted living costs excluding bill-backed categories (those are inside the bills transfer)
-    // and excluding Income/Transfers groups. Falls back to trailing 3-month actual spend.
-    const billCats=new Set(Object.keys(ENGINE.billBackedCats()));
-    const skipGroup=c=>!c||c.group==='Income'||c.group==='Transfers';
-    const bud=state.budgets[monthKey(todayISO())];
-    if(bud&&Object.keys(bud).length){
-      let t=0;
-      for(const cid in bud){const c=byId(state.categories,cid);if(skipGroup(c)||billCats.has(cid))continue;t+=bud[cid]}
-      if(t>0)return{amount:t,src:'budget'};
+    if(state.settings.spendMode==='manual')return{amount:state.settings.spendManual||0,src:'manual'};
+    if(state.settings.spendMode==='budget'){
+      const t=ENGINE.budgetSpendFromBudget();
+      return{amount:t,src:'budget'};
     }
+    if(state.settings.spendMode==='actuals')return{amount:ENGINE.budgetSpendFromActuals(),src:'actuals'};
+    return ENGINE.budgetSpendAuto();
+  },
+  budgetSpendFromBudget(){
+    const billCats=new Set(Object.keys(ENGINE.billBackedCats()));
+    const bud=state.budgets[monthKey(todayISO())];
     let t=0;
-    for(let m=1;m<=3;m++){
+    for(const cid in (bud||{})){
+      const c=byId(state.categories,cid);
+      if(!c||c.group==='Income'||c.group==='Transfers'||billCats.has(cid))continue;
+      t+=bud[cid];
+    }
+    return t;
+  },
+  budgetSpendFromActuals(){
+    const billCats=new Set(Object.keys(ENGINE.billBackedCats()));
+    const n=clamp(state.settings.spendMonths||3,1,12);
+    let t=0;
+    for(let m=1;m<=n;m++){
       const mk=monthKey(addMonths(todayISO(),-m));
       for(const tx of state.transactions){
         if(tx.amount>=0||monthKey(tx.date)!==mk)continue;
+        const acct=byId(state.accounts,tx.accountId);
+        if(acct&&!acctType(acct).asset)continue;
         const c=byId(state.categories,tx.categoryId);
-        if(skipGroup(c)||billCats.has(tx.categoryId))continue;
+        if(!c||c.group==='Income'||c.group==='Transfers'||billCats.has(tx.categoryId))continue;
         t+=-tx.amount;
       }
     }
-    return{amount:Math.round(t/3),src:'actuals'};
+    return Math.round(t/n);
+  },
+  budgetSpendAuto(){
+    const b=ENGINE.budgetSpendFromBudget();
+    if(b>0)return{amount:b,src:'budget'};
+    return{amount:ENGINE.budgetSpendFromActuals(),src:'actuals'};
+  },
+  /* A debt ticked "fund from the weekly bills transfer" owns an auto-managed
+     bill: amount, frequency and account are derived from the debt and kept in
+     step with it. An existing hand-made bill already linked to the debt is
+     adopted rather than duplicated. Unticking removes only the auto-managed
+     bill - a hand-made one is left alone. */
+  syncDebtBills(){
+    let changed=false;
+    for(const d of state.debts){
+      let bill=state.bills.find(b=>b.autoFrom===d.id)||state.bills.find(b=>b.debtId===d.id);
+      if(d.viaBills){
+        const derived={name:d.name+' repayment',amount:d.minAmount||0,freq:d.minFreq||'monthly',
+          everyN:1,debtId:d.id,inTransfer:true,autoFrom:d.id,active:true,
+          accountId:state.settings.billsAccountId||''};
+        if(d.categoryId)derived.categoryId=d.categoryId;
+        if(bill){
+          const before=JSON.stringify([bill.name,bill.amount,bill.freq,bill.debtId,bill.inTransfer,bill.autoFrom,bill.active]);
+          Object.assign(bill,derived);
+          if(!bill.nextDue)bill.nextDue=addDays(todayISO(),7);
+          if(JSON.stringify([bill.name,bill.amount,bill.freq,bill.debtId,bill.inTransfer,bill.autoFrom,bill.active])!==before)changed=true;
+        }else{
+          state.bills.push({id:uid(),categoryId:d.categoryId||'',method:'',notes:'',matchKeyword:d.matchKeyword||'',
+            autoAdvance:true,nextDue:addDays(todayISO(),7),...derived});
+          changed=true;
+        }
+      }else if(bill&&bill.autoFrom===d.id){
+        state.bills=state.bills.filter(b=>b.id!==bill.id);changed=true;
+      }
+    }
+    const ids=new Set(state.debts.map(d=>d.id));
+    const n=state.bills.length;
+    state.bills=state.bills.filter(b=>!b.autoFrom||ids.has(b.autoFrom));
+    if(state.bills.length!==n)changed=true;
+    return changed;
   },
   paySplit(){
     const income=ENGINE.incomeMonthly();
     const bills=ENGINE.billsMonthly();
-    const mins=ENGINE.minimumsMonthly();
+    // a debt whose repayment is routed through the bills account (bill linked
+    // via "Funds debt repayment of", still in the transfer) is already inside
+    // the bills line - excluding its minimum here prevents the double count
+    const funding={};
+    for(const b of state.bills)if(b.active!==false&&b.inTransfer!==false&&b.debtId&&!funding[b.debtId])funding[b.debtId]=b;
+    let mins=0,minsCovered=0;const minsWarns=[];
+    for(const d of state.debts){
+      const m=Math.round(ENGINE.minMonthly(d));
+      const b=funding[d.id];
+      if(b){
+        minsCovered+=m;
+        const bm=Math.round(ENGINE.billWeekly(b)*52/12);
+        if(bm<m*0.95)minsWarns.push({name:d.name,billM:bm,minM:m});
+      }else mins+=m;
+    }
     const spend=ENGINE.budgetSpendMonthly();
     const surplus=income-bills-mins-spend.amount;
-    return{income,bills,mins,spend:spend.amount,spendSrc:spend.src,surplus};
+    return{income,bills,mins,minsCovered,minsWarns,spend:spend.amount,spendSrc:spend.src,surplus};
   },
   surplusMonthly(){return ENGINE.paySplit().surplus},
   allocAmounts(){
@@ -1224,6 +1327,7 @@ function txFiltered(){
     (!f.account||t.accountId===f.account)&&
     (!f.category||t.categoryId===f.category)&&
     (!f.from||t.date>=f.from)&&(!f.to||t.date<=f.to)&&
+    (!f.tag||(t.tags||[]).some(tg=>tg.toLowerCase()===f.tag.toLowerCase()))&&
     (!f.q||(t.payee+' '+(t.notes||'')+' '+(t.tags||[]).join(' ')).toLowerCase().includes(f.q.toLowerCase()))
   );
   const k=ui.txSort.key,dir=ui.txSort.dir;
@@ -1285,6 +1389,8 @@ VIEWS.transactions=()=>{
     <input type="date" data-change="tx-filter" data-k="from" value="${f.from}" style="width:140px" title="From">
     <input type="date" data-change="tx-filter" data-k="to" value="${f.to}" style="width:140px" title="To">
     <input data-input="tx-filter" data-k="q" value="${esc(f.q)}" placeholder="Search payee / notes / tags..." style="width:220px">
+    ${(()=>{const tags=[...new Set(state.transactions.flatMap(t=>t.tags||[]))].sort();
+      return tags.length?`<select data-change="tx-filter" data-k="tag" style="width:130px"><option value="">All tags</option>${tags.map(tg=>`<option value="${esc(tg)}" ${f.tag===tg?'selected':''}>${esc(tg)}</option>`).join('')}</select>`:''})()}
     ${(f.account||f.category||f.from||f.to||f.q)?'<button class="btn sm ghost" data-action="tx-clear-filter">clear</button>':''}
   </div>`;
   if(upcoming.length){
@@ -1302,7 +1408,7 @@ VIEWS.transactions=()=>{
     h+=`<tr>
       <td><input type="checkbox" data-change="tx-sel" data-id="${t.id}" ${ui.txSel.has(t.id)?'checked':''}></td>
       <td class="mut">${fmtD(t.date)}</td>
-      <td>${esc(t.payee)}${t.notes?` <span class="dim" title="${esc(t.notes)}">&#9776;</span>`:''}${(t.tags||[]).map(tg=>` <span class="badge">${esc(tg)}</span>`).join('')}
+      <td>${esc(t.payee)}${t.notes?` <span class="dim" title="${esc(t.notes)}">&#9776;</span>`:''}${(t.tags||[]).map(tg=>` <span class="badge tagbtn${ui.txFilter.tag&&ui.txFilter.tag.toLowerCase()===tg.toLowerCase()?' or':''}" data-action="tx-tag" data-tag="${esc(tg)}" title="Filter by tag '${esc(tg)}'">${esc(tg)}</span>`).join('')}
         ${billByTx[t.id]?` <span class="badge bl" title="Matched to bill '${esc(billByTx[t.id])}' - no manual linking needed">&#9878; ${esc(billByTx[t.id])}</span>`:''}
         ${debtByTx[t.id]?` <span class="badge rd" title="Counts as a repayment on debt '${esc(debtByTx[t.id])}'">&#9660; ${esc(debtByTx[t.id])}</span>`:''}</td>
       <td class="mut">${esc(acctName(t.accountId))}</td>
@@ -1329,7 +1435,7 @@ function txForm(t={}){
   </div>
   <div class="frow">
     <label class="f"><span class="fl">Payment of bill</span><select name="billId"><option value="">- none -</option>${state.bills.filter(b2=>b2.active!==false).map(b2=>`<option value="${b2.id}" ${t.billId===b2.id?'selected':''}>${esc(b2.name)}</option>`).join('')}</select></label>
-    <label class="f"><span class="fl">Debt repayment of</span><select name="debtId"><option value="">- none -</option>${state.debts.map(dd=>`<option value="${dd.id}" ${t.debtId===dd.id?'selected':''}>${esc(dd.name)}</option>`).join('')}</select></label>
+    <label class="f"><span class="fl">Debt repayment of</span><select name="debtId">${debtOptions(t.debtId)}</select></label>
     <label class="f"><span class="fl">Tags (comma separated)</span><input name="tags" value="${esc((t.tags||[]).join(', '))}"></label>
     <label class="f"><span class="fl">Notes</span><input name="notes" value="${esc(t.notes||'')}"></label>
   </div>`;
@@ -1350,6 +1456,10 @@ VIEWS.bills=()=>{
     <div class="alt"><div class="l">Fortnightly</div><div class="v">${fmt(s.fortnightly)}</div></div>
     <div class="alt"><div class="l">Monthly</div><div class="v">${fmt(s.monthly)}</div></div>
     <div class="alt"><div class="l">Annual Bills</div><div class="v">${fmt0(s.annual)}</div></div>
+    ${(()=>{const incWk=Math.round(ENGINE.incomeMonthly()*12/52);
+      if(!incWk)return '';
+      const left=incWk-Math.round(s.final);
+      return`<div class="alt"><div class="l">Left after transfer</div><div class="v" style="color:${left<0?'var(--rd)':'var(--gn)'}">${fmtS(left)}</div></div>`})()}
     ${s.excluded?`<div class="alt"><div class="l">Excluded</div><div class="v" style="color:var(--am)">${s.excluded} bill${s.excluded>1?'s':''}</div></div>`:''}
     <div class="alt" style="min-width:200px">
       <div class="l">Buffer %</div>
@@ -1388,16 +1498,86 @@ VIEWS.bills=()=>{
   const items=Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([n,v],i)=>({name:n,value:Math.round(v),color:CONFIG.series[i%CONFIG.series.length]}));
   h+=`<div class="grid g2" style="margin-bottom:14px"><div class="card"><h3>Annual Bill Cost by Category</h3>${chart('bills-donut',el=>CH.donut(el,{items,centerLabel:'PER YEAR',centerValue:fmt0(s.annual)}))}</div>
   <div class="card"><h3>Weekly Set-aside Engine</h3><p class="dim" style="font-size:12px;line-height:1.7">Every bill is normalised to a true weekly cost by exact annualisation:<br><span class="num" style="color:var(--tx2)">monthly &times; 12 &divide; 52 &middot; quarterly &times; 4 &divide; 52 &middot; half-yearly &times; 2 &divide; 52 &middot; annual &divide; 52</span><br><br>Transfer <b class="acc num">${fmt(s.final)}</b> into your bills account every week and every bill is covered on average - the health check above verifies the timing.</p></div></div>`;
-  // grouped table
+  {
+    const incWk=Math.round(ENGINE.incomeMonthly()*12/52);
+    if(incWk){
+      const ps=ENGINE.paySplit();
+      const wk=v=>Math.round(v*12/52);
+      const rows=[
+        ['Income',incWk,'var(--gn)',''],
+        ['Bills transfer',-Math.round(s.final),CONFIG.colors.bl,'covers every bill in the register'],
+        ['Debt minimums outside the transfer',-wk(ps.mins),CONFIG.colors.rd,ps.minsCovered?`${fmt0(wk(ps.minsCovered))}/wk more is already inside the transfer`:''],
+        ['Living spend',-wk(ps.spend),CONFIG.colors.am,'set in Pay Split']
+      ];
+      let run=0;
+      h+=`<div class="card" style="margin-bottom:14px"><h3>What's Left After The Transfer</h3>
+      <table class="fit"><tbody>
+      ${rows.map(([n,v,c,note],i)=>{run+=v;return`<tr><td>${i?`<span style="display:inline-block;width:9px;height:9px;background:${c};margin-right:8px;border-radius:2px"></span>`:''}${n}</td>
+        <td class="r num" style="color:${i?c:'var(--gn)'}">${i?'- '+fmt(Math.abs(v)):fmt(v)}</td>
+        <td class="r num dim">${i===0?'':'leaves '+fmtS(run)}</td>
+        <td class="mut" style="font-size:11.5px">${note}</td></tr>`}).join('')}
+      <tr class="tot"><td><b>Spare per week</b></td><td class="r num" style="color:${run>=0?'var(--gn)':'var(--rd)'}"><b>${fmtS(run)}</b></td><td class="r dim num">${fmtS(Math.round(run*52/12))}/mo</td><td class="mut" style="font-size:11.5px">${run>=0?'uncommitted - allocate it in Pay Split':'committed costs exceed income'}</td></tr>
+      </tbody></table></div>`;
+    }
+  }
+  // ---- register: filter / group / sort ----
+  const bf=ui.billFilter;
+  const freqName=b=>{const f=CONFIG.billFreqs.find(x=>x.id===b.freq);return (f?f.n:b.freq)+(b.freq==='customN'?' ('+(b.everyN||1)+')':'')};
+  const gKey=b=>{
+    const c=byId(state.categories,b.categoryId);
+    switch(ui.billGroup){
+      case 'catgroup':return c?c.group:'Uncategorised';
+      case 'category':return c?c.name:'Uncategorised';
+      case 'frequency':return freqName(b);
+      case 'method':return b.method||'No method';
+      case 'account':return b.accountId?acctName(b.accountId):'No account';
+      case 'transfer':return b.inTransfer===false?'Not in weekly transfer':'In weekly transfer';
+      default:return '';
+    }
+  };
+  let list=state.bills.filter(b=>
+    (bf.status==='all'||(bf.status==='active'?b.active!==false:b.active===false))&&
+    (!bf.freq||b.freq===bf.freq)&&
+    (!bf.transfer||(bf.transfer==='in'?b.inTransfer!==false:b.inTransfer===false))&&
+    (!bf.q||(b.name+' '+(b.notes||'')+' '+(b.method||'')+' '+catName(b.categoryId)).toLowerCase().includes(bf.q.toLowerCase()))
+  );
+  const cmp={weekly:(a,b)=>ENGINE.billWeekly(b)-ENGINE.billWeekly(a),
+    annual:(a,b)=>ENGINE.billAnnual(b)-ENGINE.billAnnual(a),
+    amount:(a,b)=>b.amount-a.amount,
+    name:(a,b)=>a.name.localeCompare(b.name),
+    due:(a,b)=>(a.nextDue||'').localeCompare(b.nextDue||'')}[ui.billSort]||((a,b)=>ENGINE.billWeekly(b)-ENGINE.billWeekly(a));
+  const fUsed=[...new Set(state.bills.map(b=>b.freq))];
+  h+=`<div class="toolbar">
+    <button class="btn primary sm" data-action="bill-add">+ Add Bill</button>
+    <span class="sec-label">Group</span>
+    <select data-change="bill-group" style="width:150px">${[['catgroup','Category group'],['category','Category'],['frequency','Frequency'],['method','Payment method'],['account','Account'],['transfer','In / out of transfer'],['none','No grouping']].map(([v,n])=>`<option value="${v}" ${ui.billGroup===v?'selected':''}>${n}</option>`).join('')}</select>
+    <span class="sec-label">Sort</span>
+    <select data-change="bill-sort" style="width:120px">${[['weekly','Weekly cost'],['annual','Annual cost'],['amount','Amount'],['due','Next due'],['name','Name']].map(([v,n])=>`<option value="${v}" ${ui.billSort===v?'selected':''}>${n}</option>`).join('')}</select>
+    <select data-change="bill-filter" data-k="freq" style="width:130px"><option value="">All frequencies</option>${fUsed.map(fq=>{const f=CONFIG.billFreqs.find(x=>x.id===fq);return `<option value="${fq}" ${bf.freq===fq?'selected':''}>${f?f.n:fq}</option>`}).join('')}</select>
+    <select data-change="bill-filter" data-k="transfer" style="width:150px"><option value="">In and out of transfer</option><option value="in" ${bf.transfer==='in'?'selected':''}>In transfer only</option><option value="out" ${bf.transfer==='out'?'selected':''}>Excluded only</option></select>
+    <select data-change="bill-filter" data-k="status" style="width:110px"><option value="active" ${bf.status==='active'?'selected':''}>Active</option><option value="paused" ${bf.status==='paused'?'selected':''}>Paused</option><option value="all" ${bf.status==='all'?'selected':''}>All</option></select>
+    <input data-input="bill-filter" data-k="q" value="${esc(bf.q)}" placeholder="Search bills..." style="width:160px">
+    ${(bf.q||bf.freq||bf.transfer||bf.status!=='active')?'<button class="btn sm" data-action="bill-clear-filter">Clear</button>':''}
+  </div>`;
   const groups=new Map();
-  for(const b of state.bills){const k=b.categoryId?catShort(b.categoryId):'Uncategorised';if(!groups.has(k))groups.set(k,[]);groups.get(k).push(b)}
+  for(const b of list){const k=gKey(b);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(b)}
+  const shownWk=sum(list.filter(b=>b.active!==false&&b.inTransfer!==false).map(b=>ENGINE.billWeekly(b)));
+  const shownAn=sum(list.filter(b=>b.active!==false).map(b=>ENGINE.billAnnual(b)));
   h+='<div class="card pad0"><table><thead><tr><th>Bill</th><th>Frequency</th><th>Method</th><th>Next due</th><th class="r">Amount</th><th class="r">Weekly</th><th class="r">Annual</th><th></th></tr></thead><tbody>';
-  for(const [g,bills] of [...groups.entries()].sort((a,b)=>a[0]<b[0]?-1:1)){
-    h+=`<tr><td colspan="8" style="background:#141414"><span class="sec-label">${esc(g)}</span></td></tr>`;
-    for(const b of bills.sort((a,b)=>ENGINE.billWeekly(b)-ENGINE.billWeekly(a))){
+  if(!list.length)h+=`<tr><td colspan="8" class="dim" style="padding:18px">No bills match these filters.</td></tr>`;
+  for(const [g,bills] of [...groups.entries()].sort((a,b)=>{
+      if(ui.billGroup==='none')return 0;
+      const wa=sum(a[1].map(x=>ENGINE.billWeekly(x))),wb=sum(b[1].map(x=>ENGINE.billWeekly(x)));
+      return ui.billSort==='name'?(a[0]<b[0]?-1:1):(wb-wa);
+    })){
+    const gw=sum(bills.filter(b=>b.active!==false&&b.inTransfer!==false).map(b=>ENGINE.billWeekly(b)));
+    const ga=sum(bills.filter(b=>b.active!==false).map(b=>ENGINE.billAnnual(b)));
+    if(g!=='')h+=`<tr><td colspan="4" style="background:#141414"><span class="sec-label">${esc(g)}</span> <span class="dim" style="font-size:11px">${bills.length} bill${bills.length>1?'s':''}</span></td>
+      <td style="background:#141414"></td><td class="r acc num" style="background:#141414;font-weight:700">${fmt(Math.round(gw))}</td><td class="r num" style="background:#141414;font-weight:700">${fmt0(ga)}</td><td style="background:#141414"></td></tr>`;
+    for(const b of bills.sort(cmp)){
       const f=CONFIG.billFreqs.find(x=>x.id===b.freq);
       h+=`<tr style="${b.active===false?'opacity:.45':''}">
-        <td>${esc(b.name)}${b.active===false?' <span class="badge">PAUSED</span>':''}${b.inTransfer===false?' <span class="badge am" title="Not funded by the weekly transfer - paid from another account">NOT IN TRANSFER</span>':''}${b.notes?` <span class="dim" title="${esc(b.notes)}">&#9776;</span>`:''}
+        <td>${esc(b.name)}${b.active===false?' <span class="badge">PAUSED</span>':''}${b.inTransfer===false?' <span class="badge am" title="Not funded by the weekly transfer - paid from another account">NOT IN TRANSFER</span>':''}${b.debtId?` <span class="badge rd" title="Funds the repayment of '${esc((byId(state.debts,b.debtId)||{}).name||'')}' - Pay Split counts it once">&#9660; ${esc((byId(state.debts,b.debtId)||{}).name||'debt')}</span>`:''}${b.autoFrom?' <span class="badge" title="Managed by the debt - edit the amount or frequency on the debt itself">AUTO</span>':''}${b.notes?` <span class="dim" title="${esc(b.notes)}">&#9776;</span>`:''}
           ${(dr=>dr?`<div class="num" style="font-size:11px;margin-top:2px;color:${Math.abs(dr.pc)>10?'var(--am)':'var(--tx3)'}">last ${fmtD(dr.last.date)} &middot; actuals avg ${fmt(dr.avg)}${Math.abs(dr.pc)>10?` (${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered - update amount to fix the weekly transfer)`:''}</div>`:'')(ENGINE.billDrift(b))}</td>
         <td class="mut">${f?f.n:''}${b.freq==='customN'?' ('+(b.everyN||1)+')':''}</td>
         <td class="mut">${esc(b.method||'')}</td>
@@ -1409,12 +1589,14 @@ VIEWS.bills=()=>{
       </tr>`;
     }
   }
-  h+=`<tr class="tot"><td colspan="4">TOTAL (ACTIVE)</td><td></td><td class="r acc">${fmt(Math.round(s.weekly))}</td><td class="r">${fmt0(s.annual)}</td><td></td></tr>`;
+  const filtered=list.length!==state.bills.length;
+  h+=`<tr class="tot"><td colspan="4">${filtered?'TOTAL (SHOWN)':'TOTAL (ACTIVE)'}</td><td></td><td class="r acc">${fmt(Math.round(shownWk))}</td><td class="r">${fmt0(shownAn)}</td><td></td></tr>`;
+  if(filtered)h+=`<tr><td colspan="4" class="dim" style="font-size:11.5px">All active bills: ${fmt(Math.round(s.weekly))}/wk &middot; ${fmt0(s.annual)}/yr</td><td></td><td class="r dim num" style="font-size:11.5px">${fmt(Math.round(s.weekly))}</td><td class="r dim num" style="font-size:11.5px">${fmt0(s.annual)}</td><td></td></tr>`;
   h+='</tbody></table></div>';
   return h;
 };
 function billForm(b={}){
-  return`<div class="frow">
+  return`${b.autoFrom?`<p style="font-size:12.5px;margin-bottom:12px;color:var(--am)">&#9888; Managed by the debt "${esc((byId(state.debts,b.autoFrom)||{}).name||'')}" - change the amount or frequency on the debt itself, or untick "Fund this repayment from the weekly bills transfer" there. Edits to those fields here are overwritten.</p>`:''}<div class="frow">
     <label class="f"><span class="fl">Bill name</span><input name="name" value="${esc(b.name||'')}" required></label>
     <label class="f"><span class="fl">Category</span><select name="categoryId">${catOptions(b.categoryId)}</select></label>
   </div>
@@ -1423,7 +1605,10 @@ function billForm(b={}){
     <label class="f" style="align-self:end"><span class="chk"><input type="checkbox" name="autoAdvance" ${b.autoAdvance!==false?'checked':''}> Auto-advance due date when a matching payment appears</span></label>
   </div>
   <label class="chk" style="margin-bottom:10px"><input type="checkbox" name="inTransfer" ${b.inTransfer!==false?'checked':''}> Include in weekly transfer (this bill is paid FROM the bills account)</label>
-  <p class="dim" style="font-size:12px;margin-top:-4px;margin-bottom:10px">Untick for mortgage or loan repayments that debit another account - they are already costed as debt minimums, and counting them here would double the transfer.</p>
+  <div class="frow" style="margin-bottom:6px">
+    <label class="f"><span class="fl">Funds debt repayment of</span><select name="debtId">${debtOptions(b.debtId,'- none, ordinary bill -')}</select></label>
+  </div>
+  <p class="dim" style="font-size:12px;margin-top:-2px;margin-bottom:10px">For loan repayments: if the money routes THROUGH the bills account, keep the transfer box ticked AND link the debt here - Pay Split then counts it once (in the bills line, not the minimums line). If it debits another account entirely, untick the transfer box instead.</p>
   <div class="frow3">
     <label class="f"><span class="fl">Amount $</span><input name="amount" value="${b.amount!=null?(b.amount/100).toFixed(2):''}" inputmode="decimal" required></label>
     <label class="f"><span class="fl">Frequency</span><select name="freq" data-change="bill-freq-toggle">${CONFIG.billFreqs.map(f=>`<option value="${f.id}" ${b.freq===f.id?'selected':''}>${f.n}</option>`).join('')}</select></label>
@@ -1446,7 +1631,8 @@ VIEWS.budget=()=>{
   const mode=ui.budgetMode||state.settings.payCycle||'monthly'; // display mode
   const perFn=mode==='fortnightly';
   const budget=state.budgets[mk]||{};
-  const actuals=ENGINE.monthActuals(mk);
+  const smooth=ui.budgetSmooth!==false;
+  const actuals=smooth?ENGINE.monthActualsSmoothed(mk):ENGINE.monthActuals(mk);
   const billCats=ENGINE.billBackedCats();
   const conv=v=>perFn?v*12/26:v; // monthly cents -> display
   let h=`<div class="toolbar">
@@ -1458,6 +1644,7 @@ VIEWS.budget=()=>{
     <span class="spacer"></span>
     <span class="sec-label">Show per:</span>
     <select data-change="budget-mode" style="width:130px"><option value="monthly" ${!perFn?'selected':''}>Month</option><option value="fortnightly" ${perFn?'selected':''}>Fortnight</option></select>
+    <label class="chk" style="margin-left:10px" title="Quarterly and annual bills are budgeted monthly but paid in lumps - spreading each payment across its cycle makes budget vs actual comparable"><input type="checkbox" data-change="budget-smooth" ${smooth?'checked':''}> Spread bill payments across their cycle</label>
   </div>`;
   // summary strip
   let bInc=0,bExp=0,aInc=0,aExp=0;
@@ -1486,7 +1673,7 @@ VIEWS.budget=()=>{
       const p=bv>0?actual/bv:0;
       const cls=isInc?(p>=1?'':'warn'):(p>1?'over':p>0.85?'warn':'');
       h+=`<tr>
-        <td>${esc(c.name)} ${billCats[c.id]?`<span class="badge bl" title="Backed by bills register (${fmt(Math.round(billCats[c.id]))}/mo)">BILLS</span>`:''}</td>
+        <td>${esc(c.name)} ${billCats[c.id]?`<span class="badge bl" title="Backed by bills register (${fmt(Math.round(billCats[c.id]))}/mo)">BILLS</span>`:''}${(n=>smooth&&n>1?` <span class="badge" title="Paid every ${n} months - each payment is spread across ${n} months so it compares to the monthly budget">/${n}MO</span>`:'')(Math.max(1,...state.bills.filter(b=>b.active!==false&&b.categoryId===c.id).map(ENGINE.billCycleMonths)))}</td>
         <td class="r"><input data-change="budget-set" data-cat="${c.id}" value="${bv?(conv(bv)/100).toFixed(2):''}" placeholder="0.00" style="width:100px;text-align:right;background:transparent;border-color:#242424"></td>
         <td class="r mut">${bv?fmt(perFn?bv:bv*12/26):''}</td>
         <td class="r mut">${bv?fmt0(bv*12):''}</td>
@@ -1527,6 +1714,7 @@ VIEWS.debts=()=>{
         </div>
         <div style="text-align:right"><div class="sec-label">Balance</div><div class="num" style="font-size:20px;font-weight:700;color:var(--rd)">${fmt(d.balance)}</div></div>
         <div style="text-align:right"><div class="sec-label">Minimum</div><div class="num" style="font-size:14px">${fmt(d.minAmount)}/${{weekly:'wk',fortnightly:'fn',monthly:'mo'}[d.minFreq||'monthly']}</div></div>
+        ${d.viaBills?`<div style="text-align:right"><div class="sec-label">Funded by</div><div class="num" style="font-size:12px;color:var(--bl)">weekly bills transfer</div></div>`:''}
         ${(ps=>ps.count?`<div style="text-align:right"><div class="sec-label">Actual (3mo avg)</div><div class="num" style="font-size:14px;color:${ps.avgMo>=ps.minMo?'var(--gn)':'var(--am)'}">${fmt(ps.avgMo)}/mo</div></div>`:(d.matchKeyword?`<div style="text-align:right"><div class="sec-label">Keyword</div><div class="num" style="font-size:12px;color:var(--am)">"${esc(d.matchKeyword)}" - 0 matches</div></div>`:''))(ENGINE.debtPayStats(d))}
         <button class="btn sm" data-action="debt-detail" data-id="${d.id}">${open?'Hide':'Detail'}</button>
         <button class="iconbtn" data-action="debt-edit" data-id="${d.id}">&#9998;</button>
@@ -1589,6 +1777,9 @@ function debtForm(d={}){
     <label class="f"><span class="fl">Interest-free until</span><input type="date" name="interestFreeUntil" value="${d.interestFreeUntil||''}"></label>
   </div>
   <label class="f"><span class="fl">Transaction match keyword</span><input name="matchKeyword" value="${esc(d.matchKeyword||'')}" placeholder="e.g. PEPPER MONEY - repayments containing this auto-link"></label>
+  <label class="f"><span class="fl">Category (used for its bill and reports)</span><select name="categoryId">${catOptions(d.categoryId)}</select></label>
+  <label class="chk" style="margin-top:10px"><input type="checkbox" name="viaBills" ${d.viaBills?'checked':''}> Fund this repayment from the weekly bills transfer</label>
+  <p class="dim" style="font-size:12px;margin-top:4px;margin-bottom:8px">Tick when the repayment money routes through your bills account. A bill is created and kept in step with the minimum above, so the weekly transfer covers it and Pay Split counts it once (in the bills line, not the minimums line).</p>
   <div class="frow">
     <label class="f"><span class="fl">Loan account (this debt's own account)</span><select name="linkedAccountId">${acctOptions(d.linkedAccountId,a=>!acctType(a).asset)}</select></label>
     <label class="f"><span class="fl">Linked offset account (mortgages)</span><select name="offsetAccountId">${acctOptions(d.offsetAccountId,a=>a.type==='offset'||a.type==='savings'||a.type==='transaction')}</select></label>
@@ -1617,8 +1808,8 @@ VIEWS.paysplit=()=>{
   // waterfall
   const segs=[
     {n:'Bills transfer',v:ps.bills,c:CONFIG.colors.bl,note:'true weekly cost of every bill incl. buffer/rounding'},
-    {n:'Debt minimums',v:ps.mins,c:CONFIG.colors.rd,note:'contractual minimum repayments'},
-    {n:'Living spend',v:ps.spend,c:CONFIG.colors.am,note:ps.spendSrc==='budget'?'from this month\'s budget (non-bill categories)':'avg of last 3 months actual spend (no budget set)'},
+    {n:'Debt minimums',v:ps.mins,c:CONFIG.colors.rd,note:'contractual minimums'+(ps.minsCovered?` (${fmt0(ps.minsCovered)}/mo more is routed inside the bills transfer)`:'')},
+    {n:'Living spend',v:ps.spend,c:CONFIG.colors.am,note:'set below'},
     {n:'Surplus',v:Math.max(0,ps.surplus),c:CONFIG.colors.gn,note:'uncommitted - yours to allocate'}
   ];
   const tot=Math.max(1,ps.income);
@@ -1629,8 +1820,35 @@ VIEWS.paysplit=()=>{
     </div>
     <table class="fit"><tbody>
       <tr><td><b>Income</b></td><td class="r num"><b>${fmt(cv(ps.income))}</b></td><td class="mut"></td></tr>
-      ${segs.map(s=>`<tr><td><span style="display:inline-block;width:9px;height:9px;background:${s.c};margin-right:8px;border-radius:2px"></span>${s.n}</td><td class="r num" style="color:${s.c}">${s.n==='Surplus'?'':'- '}${fmt(cv(s.v))}</td><td class="mut" style="font-size:11.5px">${s.note}</td></tr>`).join('')}
+      ${segs.map(s=>{
+        if(s.n!=='Living spend')return`<tr><td><span style="display:inline-block;width:9px;height:9px;background:${s.c};margin-right:8px;border-radius:2px"></span>${s.n}</td><td class="r num" style="color:${s.c}">${s.n==='Surplus'?'':'- '}${fmt(cv(s.v))}</td><td class="mut" style="font-size:11.5px">${s.note}</td></tr>`;
+        const md=state.settings.spendMode||'auto';
+        const auto=ENGINE.budgetSpendAuto();
+        return`<tr><td><span style="display:inline-block;width:9px;height:9px;background:${s.c};margin-right:8px;border-radius:2px"></span>Living spend</td>
+          <td class="r num" style="color:${s.c}">- ${fmt(cv(s.v))}</td>
+          <td>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <select data-change="spend-mode" style="width:165px">
+                <option value="auto" ${md==='auto'?'selected':''}>Auto (budget, else actuals)</option>
+                <option value="budget" ${md==='budget'?'selected':''}>This month's budget</option>
+                <option value="actuals" ${md==='actuals'?'selected':''}>Recent actuals average</option>
+                <option value="manual" ${md==='manual'?'selected':''}>Manual amount</option>
+              </select>
+              ${md==='manual'
+                ?`<input value="${state.settings.spendManual?(state.settings.spendManual/100).toFixed(2):''}" data-change="spend-manual" placeholder="per month $" style="width:120px" inputmode="decimal"> <span class="dim" style="font-size:11.5px">/month</span>`
+                :''}
+              ${(md==='actuals'||(md==='auto'&&ps.spendSrc==='actuals'))
+                ?`<span class="dim" style="font-size:11.5px">over</span><select data-change="spend-months" style="width:95px">${[1,2,3,6,12].map(n=>`<option value="${n}" ${(state.settings.spendMonths||3)===n?'selected':''}>${n} month${n>1?'s':''}</option>`).join('')}</select>`
+                :''}
+            </div>
+            <div class="dim" style="font-size:11px;margin-top:3px">${
+              md==='manual'?`your figure - auto would suggest ${fmt(auto.amount)}/mo (${auto.src==='budget'?'budget':'actuals'})`
+              :md==='budget'?`from this month's budget, non-bill categories${ENGINE.budgetSpendFromBudget()?'':' - no budget set for this month'}`
+              :`average of the last ${clamp(state.settings.spendMonths||3,1,12)} month(s) actual spend, excluding bills and transfers`}</div>
+          </td></tr>`;
+      }).join('')}
     </tbody></table>
+    ${ps.minsWarns&&ps.minsWarns.length?ps.minsWarns.map(w2=>`<p style="color:var(--am);font-size:12px;margin-top:8px;font-family:var(--mono)">&#9888; The bill funding "${esc(w2.name)}" transfers ${fmt0(w2.billM)}/mo but the debt minimum is ${fmt0(w2.minM)}/mo - the bills account will run short. Fix the bill's amount or frequency.</p>`).join(''):''}
     ${ps.surplus<0?`<p style="color:var(--rd);font-size:12.5px;margin-top:10px;font-family:var(--mono)">Deficit: committed costs exceed income by ${fmt0(cv(-ps.surplus))}/${per[1]}. Bills + minimums + living spend need trimming, or income is missing here.</p>`:''}
   </div>`;
   // allocation
@@ -1977,7 +2195,8 @@ VIEWS.settings=()=>{
   h+=`<div class="card"><h3>Sync Across Devices</h3>
     <p class="dim" style="font-size:12.5px;margin-bottom:12px;line-height:1.6">Syncs your data through a <b>private GitHub Gist</b> in your own account - open the app anywhere, it pulls the latest on open and pushes changes a few seconds after you make them. Tokens and API keys never leave each device.</p>
     ${syncOn
-      ?`<p class="num" style="font-size:12.5px;margin-bottom:10px">Connected &middot; gist <span class="dim">${esc(state.settings.gistId.slice(0,10))}...</span> &middot; rev ${state.syncMeta?.rev||0}${state.syncMeta?.ts?` &middot; last push ${fmtD(state.syncMeta.ts.slice(0,10))}`:''}</p>
+      ?`<p class="num" style="font-size:12.5px;margin-bottom:6px">Connected &middot; rev ${state.syncMeta?.rev||0}${state.syncMeta?.ts?` &middot; last push ${fmtD(state.syncMeta.ts.slice(0,10))}`:''}</p>
+       <p style="font-size:12px;margin-bottom:10px"><span class="sec-label">Gist ID (needed on your other devices)</span><br><span class="num" style="user-select:all">${esc(state.settings.gistId)}</span> <button class="btn sm" data-action="sync-copy-id">Copy</button></p>
        <div class="pill-row"><button class="btn sm" data-action="sync-now">Sync now</button><button class="btn sm" data-action="sync-disconnect">Disconnect this device</button></div>`
       :`<label class="f"><span class="fl">GitHub token (fine-grained, Gist read/write only)</span><input type="password" id="sync-token" placeholder="github_pat_..." autocomplete="off" spellcheck="false" value="${esc(state.settings.ghToken||'')}"></label>
        <label class="f"><span class="fl">Existing sync gist ID (leave blank on your FIRST device)</span><input id="sync-gist" placeholder="Only when connecting a second device" autocomplete="off" spellcheck="false"></label>
@@ -2075,7 +2294,8 @@ const ACTIONS={
   },
   'tx-sort':el=>{const k=el.dataset.k;if(ui.txSort.key===k)ui.txSort.dir*=-1;else ui.txSort={key:k,dir:k==='date'?-1:1};render()},
   'tx-page':el=>{ui.txPage+=+el.dataset.d;render()},
-  'tx-clear-filter':()=>{ui.txFilter={account:'',category:'',from:'',to:'',q:''};ui.txPage=0;render()},
+  'tx-clear-filter':()=>{ui.txFilter={account:'',category:'',from:'',to:'',q:'',tag:''};ui.txPage=0;render()},
+  'tx-tag':el=>{const t=el.dataset.tag;ui.txFilter.tag=(ui.txFilter.tag===t?'':t);ui.txPage=0;setView('transactions')},
   'tx-bulk-del':async()=>{
     if(await MODAL.confirm('Delete Transactions',`Delete ${ui.txSel.size} selected transactions?`,{danger:true,okLabel:'Delete all'})){
       state.transactions=state.transactions.filter(t=>!ui.txSel.has(t.id));ui.txSel.clear();save();render();toast('Deleted');
@@ -2092,7 +2312,7 @@ const ACTIONS={
   },
   'tx-bulk-debt':()=>{
     if(!state.debts.length)return toast('No debts set up yet');
-    openForm(`Link ${ui.txSel.size} Transactions to Debt`,`<label class="f"><span class="fl">Debt</span><select name="debtId"><option value="">- unlink -</option>${state.debts.map(dd=>`<option value="${dd.id}">${esc(dd.name)}</option>`).join('')}</select></label><p class="dim" style="font-size:12px">Linked transactions appear as repayment history on the debt, with actual vs minimum tracking.</p>`,'tx-bulk-debt-save',{saveLabel:'Link'});
+    openForm(`Link ${ui.txSel.size} Transactions to Debt`,`<label class="f"><span class="fl">Debt</span><select name="debtId">${debtOptions('','- unlink -')}</select></label><p class="dim" style="font-size:12px">Linked transactions appear as repayment history on the debt, with actual vs minimum tracking.</p>`,'tx-bulk-debt-save',{saveLabel:'Link'});
   },
   'tx-bulk-debt-save':()=>{
     const v=modalFormValues();
@@ -2148,13 +2368,15 @@ const ACTIONS={
   'wiz-back':()=>{if(ui.wiz.step>1)ui.wiz.step--;$('#modal-layer .modal-b').innerHTML=wizHtml()},
   'wiz-import':()=>{
     const res=wizImport();
-    const adv=ENGINE.autoAdvanceBills();
+    ENGINE.syncDebtBills();
+  const adv=ENGINE.autoAdvanceBills();
     MODAL.close();save();render();
     toast(`Imported ${res.added} transactions (${res.dupes} duplicates skipped, ${res.bad} rows unreadable)${adv?` - ${adv} bills auto-advanced`:''}`);
   },
 
   /* ---- bills ---- */
   'bill-add':()=>{ui.editing=null;openForm('Add Bill',billForm(),'bill-save')},
+  'bill-clear-filter':()=>{ui.billFilter={q:'',freq:'',transfer:'',status:'active'};render()},
   'tx-to-bill':el=>{
     const t=byId(state.transactions,el.dataset.id);if(!t)return;
     ui.editing=null;
@@ -2172,7 +2394,7 @@ const ACTIONS={
   'bill-save':()=>{
     const v=modalFormValues();
     if(!v.name.trim())return toast('Bill name is required');
-    const rec={name:v.name.trim(),categoryId:v.categoryId,amount:cents(v.amount),freq:v.freq,everyN:Math.max(1,parseInt(v.everyN)||1),nextDue:v.nextDue,accountId:v.accountId,method:v.method,notes:v.notes.trim(),matchKeyword:(v.matchKeyword||'').trim(),autoAdvance:!!v.autoAdvance,inTransfer:!!v.inTransfer,active:!!v.active};
+    const rec={name:v.name.trim(),categoryId:v.categoryId,amount:cents(v.amount),freq:v.freq,everyN:Math.max(1,parseInt(v.everyN)||1),nextDue:v.nextDue,accountId:v.accountId,method:v.method,notes:v.notes.trim(),matchKeyword:(v.matchKeyword||'').trim(),autoAdvance:!!v.autoAdvance,inTransfer:!!v.inTransfer,debtId:v.debtId||'',active:!!v.active};
     if(ui.editing)Object.assign(byId(state.bills,ui.editing),rec);
     else state.bills.push({id:uid(),...rec});
     MODAL.close();save();render();toast('Bill saved - weekly transfer updated');
@@ -2219,15 +2441,18 @@ const ACTIONS={
   'debt-save':()=>{
     const v=modalFormValues();
     if(!v.name.trim())return toast('Debt name is required');
-    const rec={name:v.name.trim(),type:v.type,balance:cents(v.balance),rate:pct(v.rate)||0,fees:cents(v.fees),minAmount:cents(v.minAmount),minFreq:v.minFreq,interestFreeUntil:v.interestFreeUntil,offsetAccountId:v.offsetAccountId,linkedAccountId:v.linkedAccountId||'',matchKeyword:(v.matchKeyword||'').trim(),fixed:!!v.fixed};
+    const rec={name:v.name.trim(),type:v.type,balance:cents(v.balance),rate:pct(v.rate)||0,fees:cents(v.fees),minAmount:cents(v.minAmount),minFreq:v.minFreq,interestFreeUntil:v.interestFreeUntil,offsetAccountId:v.offsetAccountId,linkedAccountId:v.linkedAccountId||'',matchKeyword:(v.matchKeyword||'').trim(),viaBills:!!v.viaBills,categoryId:v.categoryId||'',fixed:!!v.fixed};
     if(ui.editing)Object.assign(byId(state.debts,ui.editing),rec);
     else state.debts.push({id:uid(),...rec});
-    MODAL.close();save();render();toast('Debt saved');
+    ENGINE.syncDebtBills();
+    MODAL.close();save();render();
+    toast(rec.viaBills?'Debt saved - bill synced to the weekly transfer':'Debt saved');
   },
   'debt-del':async el=>{
     const d=byId(state.debts,el.dataset.id);
     if(await MODAL.confirm('Delete Debt',`Delete <b>${esc(d.name)}</b>? Scenarios will re-simulate without it.`,{danger:true,okLabel:'Delete'})){
       state.debts=state.debts.filter(x=>x.id!==d.id);
+      ENGINE.syncDebtBills();
       state.scenarios.forEach(sc=>{if(sc.order)sc.order=sc.order.filter(id=>id!==d.id)});
       save();render();
     }
@@ -2386,9 +2611,12 @@ const ACTIONS={
   },
   'set-paycycle':()=>{},
   'backup-export':()=>{
-    const data=JSON.stringify(state,null,1);
+    // tokens stay on-device: stripped from backups just like the sync payload
+    const s=JSON.parse(JSON.stringify(state));
+    s.settings.apiKey='';s.settings.ghToken='';
+    const data=JSON.stringify(s,null,1);
     saveViaFS(`financehub-backup-${todayISO()}.json`,data,'JSON backup','.json','application/json');
-    toast('Backup exported');
+    toast('Backup exported (API keys and tokens are not included)');
   },
   'backup-import':()=>{
     MODAL.open({title:'Restore From Backup',body:`<p class="dim" style="font-size:12.5px;line-height:1.6;margin-bottom:12px">Restoring a JSON backup <b style="color:var(--rd)">replaces all current data</b> in this browser. Export a backup of the current data first if you might want it back.</p><input type="file" id="restore-file" accept=".json,application/json">`,footer:`<button class="btn" data-action="modal-close">Cancel</button><button class="btn danger" data-action="backup-import-go">Replace all data</button>`});
@@ -2461,6 +2689,10 @@ const CHANGES={
   'bills-account':el=>{state.settings.billsAccountId=el.value;save();render()},
   'bill-freq-toggle':el=>{const w=$('#everyN-wrap');if(w)w.style.display=el.value==='customN'?'':'none'},
   'budget-mode':el=>{ui.budgetMode=el.value;render()},
+  'budget-smooth':el=>{ui.budgetSmooth=el.checked;render()},
+  'bill-group':el=>{ui.billGroup=el.value;render()},
+  'bill-sort':el=>{ui.billSort=el.value;render()},
+  'bill-filter':el=>{ui.billFilter[el.dataset.k]=el.value;render()},
   'budget-set':el=>{
     const mk=ui.budgetMonth;
     state.budgets[mk]=state.budgets[mk]||{};
@@ -2486,6 +2718,9 @@ const CHANGES={
     else ui.payoffSel=ui.payoffSel.filter(x=>x!==id);
     ui.sensitivity=null;render();
   },
+  'spend-mode':el=>{state.settings.spendMode=el.value;save();render()},
+  'spend-manual':el=>{state.settings.spendManual=cents(el.value);save();render()},
+  'spend-months':el=>{state.settings.spendMonths=clamp(parseInt(el.value)||3,1,12);save();render()},
   'alloc-set':el=>{
     const a=state.settings.alloc=state.settings.alloc||{debt:70,goals:20,keep:10};
     a[el.dataset.k]=clamp(parseInt(el.value)||0,0,100);
@@ -2522,6 +2757,7 @@ const CHANGES={
   }
 };
 const INPUTS={
+  'bill-filter':debounce(el=>{ui.billFilter[el.dataset.k]=el.value;const ae=document.activeElement;render();const n=$(`[data-input="bill-filter"][data-k="q"]`);if(n&&ae&&ae.dataset&&ae.dataset.input==='bill-filter'){n.focus();n.setSelectionRange(n.value.length,n.value.length)}},350),
   'tx-filter':debounce(el=>{ui.txFilter[el.dataset.k]=el.value;ui.txPage=0;const ae=document.activeElement;render();const nel=$(`[data-input="tx-filter"][data-k="q"]`);if(nel&&ae&&ae.dataset&&ae.dataset.input==='tx-filter'){nel.focus();nel.setSelectionRange(nel.value.length,nel.value.length)}},350)
 };
 
@@ -3025,6 +3261,7 @@ Object.assign(ACTIONS,{
       render();
     }catch(e){state.settings.ghToken=tok;toast(String(e.message||e));el.disabled=false;el.textContent='Enable sync'}
   },
+  'sync-copy-id':async()=>{try{await navigator.clipboard.writeText(state.settings.gistId);toast('Gist ID copied')}catch(e){toast('Select and copy the ID manually')}},
   'sync-now':async()=>{await SYNC.pull({silent:false});toast('Sync complete')},
   'sync-disconnect':async()=>{
     if(await MODAL.confirm('Disconnect Sync','Stops syncing from this device only. The gist and other devices are untouched.',{okLabel:'Disconnect'})){
@@ -3202,6 +3439,8 @@ function loadSample(){
   // migrate/repair
   state.settings=Object.assign(emptyState().settings,state.settings);
   state.settings.alloc=Object.assign({debt:70,goals:20,keep:10},state.settings.alloc||{});
+  if(!state.settings.spendMode)state.settings.spendMode='auto';
+  if(!state.settings.spendMonths)state.settings.spendMonths=3;
   state.consol=Object.assign({debtIds:[],rate:9,years:5,fees:0},state.consol||{});
   if(!Array.isArray(state.incomes))state.incomes=[];
   if(!Array.isArray(state.categories)||!state.categories.length)state.categories=defaultCategories();
