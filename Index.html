@@ -242,7 +242,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-15.5';
+const BUILD='2026-09-15.7';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -425,6 +425,16 @@ function acctName(id){const a=byId(state.accounts,id);return a?a.name:'\u2014'}
 function acctType(a){return CONFIG.accountTypes.find(t=>t.id===a.type)||CONFIG.accountTypes[0]}
 function isAsset(a){return acctType(a).asset}
 function activeAccounts(){return state.accounts.filter(a=>!a.archived)}
+/* sparkline colour = is this account moving the right way? Assets: up is
+   good. Liabilities are stored negative, so rising towards zero is the debt
+   shrinking - also good. Flat or single point stays neutral. */
+function sparkTrendColor(pts,isAssetAcct){
+  if(!pts||pts.length<2)return CONFIG.colors.tx3||'#6a6a6a';
+  const first=pts[0],last=pts[pts.length-1];
+  if(last===first)return CONFIG.colors.tx3||'#6a6a6a';
+  const better=last>first; // works for both: liability values are negative, so up = less owed
+  return better?CONFIG.colors.gn:CONFIG.colors.rd;
+}
 function activeDebts(){return state.debts.filter(d=>!d.closed)}
 /* ---- close-out ----
    Closed debts and archived accounts stay in the ledger for history
@@ -1340,7 +1350,7 @@ VIEWS.accounts=()=>{
       <div class="num" style="font-size:24px;font-weight:700;margin:10px 0 2px;${!t.asset&&a.balance!==0?'color:var(--rd)':''}">${fmt(Math.abs(a.balance))}</div>
       <div class="dim" style="font-size:12.5px;font-family:var(--mono)">${a.rate?a.rate+'% p.a.':''}${a.limit?(a.rate?' &middot; ':'')+'limit '+fmt0(a.limit):''}${a.archived?' &middot; ARCHIVED':''}</div>
       <div style="display:flex;align-items:flex-end;gap:8px;margin-top:10px">
-        ${CH.spark(histPts,120,28,t.asset?CONFIG.colors.gn:CONFIG.colors.rd)}
+        ${CH.spark(histPts,120,28,sparkTrendColor(histPts,t.asset))}
         <span class="spacer" style="flex:1"></span>
         <button class="iconbtn" data-action="account-balance" data-id="${a.id}" title="Update balance">$&#8644;</button>
         <button class="iconbtn" data-action="account-edit" data-id="${a.id}" title="Edit">&#9998;</button>
@@ -1484,7 +1494,7 @@ VIEWS.transactions=()=>{
     h+=`<tr>
       <td><input type="checkbox" data-change="tx-sel" data-id="${t.id}" ${ui.txSel.has(t.id)?'checked':''}></td>
       <td class="mut">${fmtD(t.date)}</td>
-      <td>${esc(t.payee)}${t.notes?` <span class="dim" title="${esc(t.notes)}">&#9776;</span>`:''}${(t.tags||[]).map(tg=>` <span class="badge tagbtn${ui.txFilter.tag&&ui.txFilter.tag.toLowerCase()===tg.toLowerCase()?' or':''}" data-action="tx-tag" data-tag="${esc(tg)}" title="Filter by tag '${esc(tg)}'">${esc(tg)}</span>`).join('')}
+      <td>${esc(t.payee)}${(t.tags||[]).map(tg=>` <span class="badge tagbtn${ui.txFilter.tag&&ui.txFilter.tag.toLowerCase()===tg.toLowerCase()?' or':''}" data-action="tx-tag" data-tag="${esc(tg)}" title="Filter by tag '${esc(tg)}'">${esc(tg)}</span>`).join('')}
         ${billByTx[t.id]?` <span class="badge bl" title="Matched to bill '${esc(billByTx[t.id])}' - no manual linking needed">&#9878; ${esc(billByTx[t.id])}</span>`:''}
         ${debtByTx[t.id]?` <span class="badge rd" title="Counts as a repayment on debt '${esc(debtByTx[t.id])}'">&#9660; ${esc(debtByTx[t.id])}</span>`:''}</td>
       <td class="mut">${esc(acctName(t.accountId))}</td>
@@ -3073,7 +3083,7 @@ function aiImpHtml(){
     <p id="aiimp-status" class="dim" style="font-size:12.5px;font-family:var(--mono);margin-top:8px"></p>
     <div class="modal-f" style="border:none;padding:14px 0 0"><button class="btn" data-action="modal-close">Cancel</button><span style="flex:1"></span><button class="btn primary" data-action="ai-imp-run">Extract transactions</button></div>`;
   }
-  const pv=aiImportPreview(w2.rows);
+  const pv=aiImportPreview(w2.rows,w2.accountId);
   return`<div class="grid g4" style="margin-bottom:14px">
     ${statCard('Will import',String(pv.add),'pos','new')}
     ${statCard('Exact duplicates',String(pv.dupes),pv.dupes?'acc':'','skipped by hash')}
@@ -3544,16 +3554,19 @@ Rules:
 /* classify each extracted row:
    'new'  - nothing like it exists
    'dupe' - exact hash match (date+amount+description) - always skipped
-   'near' - same date + same amount but DIFFERENT description: almost always
-            the same payment rendered differently by the statement vs a CSV
-            export. Skipped by default, importable via checkbox. Each existing
-            transaction can absorb only one near-match per batch, so two
-            genuinely separate identical-amount purchases still both import. */
-function aiClassify(rows){
+   'near' - same date + same amount but DIFFERENT description, ON THE SAME
+            ACCOUNT: almost always the same payment rendered differently by
+            the statement vs a CSV export. Skipped by default, importable via
+            checkbox. Each existing transaction can absorb only one near-match
+            per batch, so two genuinely separate identical-amount purchases
+            still both import. A transaction lives on one account, so a same-
+            day same-amount entry on a DIFFERENT account is not a duplicate
+            (e.g. $1,000 landing in Revolut vs $1,000 landing in Savings). */
+function aiClassify(rows,accountId){
   const existing=new Set(state.transactions.map(t=>t.hash));
   const hashFor=wizHashes();
   const byDayAmt={};
-  for(const t of state.transactions){const k=t.date+'|'+t.amount;(byDayAmt[k]=byDayAmt[k]||[]).push(t)}
+  for(const t of state.transactions){if(accountId&&t.accountId!==accountId)continue;const k=t.date+'|'+t.amount;(byDayAmt[k]=byDayAmt[k]||[]).push(t)}
   const consumed=new Set();
   return rows.map(p=>{
     if(existing.has(hashFor(p)))return{...p,cls:'dupe'};
@@ -3562,8 +3575,8 @@ function aiClassify(rows){
     return{...p,cls:'new'};
   });
 }
-function aiImportPreview(rows){
-  const cl=aiClassify(rows);
+function aiImportPreview(rows,accountId){
+  const cl=aiClassify(rows,accountId);
   return{add:cl.filter(r=>r.cls==='new').length,dupes:cl.filter(r=>r.cls==='dupe').length,near:cl.filter(r=>r.cls==='near').length,ruled:rows.filter(p=>ENGINE.applyRules(p.desc)).length,rows:cl};
 }
 Object.assign(ACTIONS,{
@@ -3590,7 +3603,7 @@ Object.assign(ACTIONS,{
   'ai-imp-commit':()=>{
     const w2=ui.aiimp;
     const includeNear=!!$('#aiimp-near')?.checked;
-    const cl=aiClassify(w2.rows);
+    const cl=aiClassify(w2.rows,w2.accountId);
     const hashFor=wizHashes();
     let added=0,dupes=0,nearSkipped=0;
     for(const p of cl){
