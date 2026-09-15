@@ -242,7 +242,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-15.7';
+const BUILD='2026-09-15.8';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -1263,8 +1263,18 @@ const VIEWS={};
 VIEWS.dashboard=()=>{
   const nw=ENGINE.netWorthNow(),bs=ENGINE.billsSummary();
   const mk=monthKey(todayISO()),act=ENGINE.monthActuals(mk);
-  let inc=0,exp=0;
-  for(const t of state.transactions){if(monthKey(t.date)!==mk)continue;if(t.amount>0)inc+=t.amount;else exp+=-t.amount}
+  // cash in/out this month = money actually crossing the household boundary:
+  // internal transfers (incl. loan drawdowns/payouts between your own accounts)
+  // and loan-side mirror rows are excluded, otherwise a refinance or a bills
+  // top-up shows as tens of thousands "in" and "out"
+  let inc=0,exp=0,moved=0;
+  for(const t of state.transactions){
+    if(monthKey(t.date)!==mk)continue;
+    const c=byId(state.categories,t.categoryId);
+    const acct=byId(state.accounts,t.accountId);
+    if((c&&c.group==='Transfers')||(acct&&!isAsset(acct))){moved+=Math.abs(t.amount);continue}
+    if(t.amount>0)inc+=t.amount;else exp+=-t.amount;
+  }
   const upcoming=ENGINE.upcomingBills(14);
   const bl=activeDebts().length?ENGINE.baseline():null;
   // net worth mini series
@@ -1272,8 +1282,8 @@ VIEWS.dashboard=()=>{
   let h=`<div class="grid g4" style="margin-bottom:14px">
     ${statCard('Net Worth',fmtS(nw.net),nw.net>=0?'pos':'neg','Assets '+fmt0(nw.assets)+' / Debt '+fmt0(nw.liab))}
     <div class="card" style="border-color:var(--or)"><div class="sec-label acc">Weekly Bills Transfer</div><div class="num big acc" style="margin-top:6px">${fmt(bs.final)}</div><div class="dim" style="font-size:12px;margin-top:4px;font-family:var(--mono)">${bs.count} active bills &middot; <span data-action="nav" data-view="bills" style="cursor:pointer;color:var(--or)">open bills &rarr;</span></div></div>
-    ${statCard('This Month In',fmt(inc),'pos',fmtMY(mk+'-01'))}
-    ${statCard('This Month Out',fmt(exp),exp>inc?'neg':'','Surplus '+fmtS(inc-exp))}
+    ${statCard('This Month In',fmt(inc),'pos',fmtMY(mk+'-01')+' &middot; excl. transfers')}
+    ${statCard('This Month Out',fmt(exp),exp>inc?'neg':'','Surplus '+fmtS(inc-exp)+(moved?' &middot; '+fmt0(moved)+' moved between accounts':''))}
   </div>`;
   h+=`<div class="grid g2">`;
   h+=`<div class="card"><h3>Net Worth Trend</h3>${nws.length>1?chart('dash-nw',el=>CH.line(el,{labels:nws.map(s=>fmtMY(s.mk+'-01')),series:[{name:'Net worth',color:CONFIG.colors.or,data:nws.map(s=>s.net)}],fillFirst:true,height:200})):emptyBox('\u03A3','Add accounts and take snapshots to build your net worth history.')}</div>`;
