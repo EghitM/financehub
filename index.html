@@ -258,7 +258,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-16.6';
+const BUILD='2026-09-16.7';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -284,7 +284,7 @@ const CONFIG = {
     ['dashboard','Dashboard','\u25A0'],['accounts','Accounts','\u25A4'],['transactions','Transactions','\u21C6'],
     ['bills','Bills','\u2261'],['budget','Budget','\u25D1'],['debts','Debts','\u25BC'],
     ['paysplit','Pay Split','\u2696'],['payoff','Payoff Planner','\u2197'],['goals','Savings Goals','\u25CE'],['networth','Net Worth','\u03A3'],
-    ['reports','Reports','\u2237'],['settings','Settings','\u2699']
+    ['reports','Reports','\u2237'],['review','Health Check','\u2713'],['settings','Settings','\u2699']
   ]
 };
 
@@ -631,6 +631,75 @@ const ENGINE={
     }
     for(const k in out)out[k]=Math.round(out[k]);
     return out;
+  },
+  /* ---- Health Check ----
+     Deterministic setup review: every rule is something the numbers can
+     prove, so the list is the same each time and each item says what to do.
+     Returns [{sev:'high'|'med'|'low', area, title, detail, view, count}]. */
+  healthCheck(){
+    const out=[];const add=(sev,area,title,detail,view,count)=>out.push({sev,area,title,detail,view,count});
+    const today=todayISO(),cat=id=>byId(state.categories,id),acct=id=>byId(state.accounts,id);
+    const act=state.bills.filter(b=>b.active!==false),debts=activeDebts();
+    const cashAcct=a=>a&&acctType(a).asset&&!a.noTx&&!a.archived;
+    // 1. living spend counted twice: a Transfers-group bill in the weekly transfer while living spend comes from actuals
+    if((state.settings.spendMode||'auto')!=='manual'){
+      const dbl=act.filter(b=>b.inTransfer!==false&&cat(b.categoryId)?.group==='Transfers'&&!b.debtId&&!b.autoFrom);
+      if(dbl.length)add('high','Pay Split','Spending allowance counted twice',`${dbl.map(b=>b.name).join(', ')} ${dbl.length>1?'are':'is'} an internal transfer inside the weekly bills transfer, and Living spend is taken from actuals, which already counts what that money is spent on. Untick "in weekly transfer" on the bill, or switch Living spend to Manual at the allowance amount.`,'bills',dbl.length);
+    }
+    // 2. debt funded twice: viaBills auto bill AND a manual bill in the transfer linked to the same debt
+    for(const d of debts){
+      const manual=act.filter(b=>b.debtId===d.id&&!b.autoFrom&&b.inTransfer!==false);
+      if(d.viaBills&&manual.length)add('high','Debts',`${d.name} repayment counted twice`,`It is set to fund via bills (AUTO bill) and also has a manual bill in the transfer (${manual.map(b=>b.name).join(', ')}). Keep one.`,'debts',1);
+    }
+    // 3. debt minimum vs what is actually paid
+    for(const d of debts){
+      const ps=ENGINE.debtPayStats(d);
+      if(ps.count>=2&&d.minAmount){const min=Math.round(ENGINE.minMonthly(d));const avg=Math.round(ps.avgMo||0);if(avg&&Math.abs(avg-min)/min>0.03)add('med','Debts',`${d.name} minimum is ${fmt(min)}/mo but actuals average ${fmt(avg)}/mo`,`Update the minimum on the debt so Pay Split and the Payoff Planner use the real repayment${d.viaBills?' - the AUTO bill follows it':''}.`,'debts',1)}
+    }
+    // 4. bills drifting
+    const drift=act.map(b=>({b,dr:ENGINE.billDrift(b)})).filter(x=>x.dr&&Math.abs(x.dr.pc)>10);
+    if(drift.length)add('med','Bills','Registered amounts out of step with actuals',drift.map(x=>`${x.b.name} ${x.dr.pc>0?'+':''}${x.dr.pc.toFixed(0)}% (avg ${fmt(x.dr.avg)})`).join('; ')+'. Fix the amounts so the weekly transfer is right.','bills',drift.length);
+    // 5. bills with no keyword
+    const nokw=act.filter(b=>!(b.matchKeyword||'').trim()&&!b.autoFrom&&b.freq!=='schedule'||(b.freq==='schedule'&&!(b.matchKeyword||'').trim()));
+    if(nokw.length)add('low','Bills',`${nokw.length} bill${nokw.length>1?'s have':' has'} no match keyword`,`${nokw.map(b=>b.name).join(', ')}. Without one, Last paid stays blank and the due date only moves when you press Paid.`,'bills',nokw.length);
+    // 6. stale due dates: overdue > 14 days with a keyword (a payment should have matched)
+    const stale=act.filter(b=>b.nextDue&&daysBetween(b.nextDue,today)>14&&!b.scheduleDone);
+    if(stale.length)add('med','Bills',`${stale.length} bill${stale.length>1?'s':''} overdue by more than two weeks`,`${stale.map(b=>`${b.name} (${fmtD(b.nextDue)})`).join(', ')}. Either the payment has not been imported, the keyword does not match the bank description, or the bill was cancelled - fix or press Paid.`,'bills',stale.length);
+    // 7. bills account not set
+    if(!state.settings.billsAccountId)add('med','Settings','No bills account selected','The 12-week projection and the transfer health check need to know which account the weekly transfer goes into. Settings > Bills account.','settings',1);
+    // 8. no income
+    if(!state.incomes.length)add('high','Pay Split','No income entered','Pay Split cannot compute a surplus without at least one income source.','paysplit',1);
+    // 9. uncategorised recent transactions
+    const since=addMonths(today,-3);
+    const unc=personalTx().filter(t=>!t.categoryId&&t.date>=since&&t.amount<0&&cashAcct(acct(t.accountId)));
+    if(unc.length){const big=unc.filter(t=>Math.abs(t.amount)>=100000);add(big.length?'high':'low','Transactions',`${unc.length} uncategorised expense${unc.length>1?'s':''} in the last 3 months${big.length?` including ${big.length} over $1,000`:''}`,`Uncategorised rows count as living spend in Pay Split and as "Uncategorised" in Reports. ${big.length?`Large ones (${big.slice(0,3).map(t=>`${fmt(Math.abs(t.amount))} ${t.payee}`).join('; ')}) are often loan payouts or transfers - categorise those first.`:'Run AI categorise or apply keyword rules.'}`,'transactions',unc.length);}
+    // 10. big non-transfer movements on cash accounts (refinance / drawdown miscategorised)
+    const bigCash=personalTx().filter(t=>t.date>=since&&Math.abs(t.amount)>=1000000&&cashAcct(acct(t.accountId))&&cat(t.categoryId)&&cat(t.categoryId).group!=='Transfers'&&cat(t.categoryId).group!=='Income');
+    if(bigCash.length)add('med','Transactions',`${bigCash.length} transaction${bigCash.length>1?'s':''} over $10,000 categorised as spending`,`${bigCash.slice(0,4).map(t=>`${fmtD(t.date)} ${fmt(Math.abs(t.amount))} ${t.payee}`).join('; ')}. If these are loan drawdowns, payouts or moves between your own accounts they should be Transfers > Internal Transfer.`,'transactions',bigCash.length);
+    // 11. loan-account credits not marked transfer (repayments read as income)
+    const loanInc=state.transactions.filter(t=>{const a=acct(t.accountId);return a&&!acctType(a).asset&&t.amount>0&&t.date>=since&&cat(t.categoryId)&&cat(t.categoryId).group!=='Transfers'});
+    if(loanInc.length)add('med','Transactions',`${loanInc.length} loan-account credit${loanInc.length>1?'s':''} not categorised as Internal Transfer`,'Repayments arriving on a loan account are the mirror of money that left another account; categorise them Transfers > Internal Transfer so Reports do not double count.','transactions',loanInc.length);
+    // 12. income category on negative amounts
+    const negInc=personalTx().filter(t=>t.amount<0&&t.date>=since&&cat(t.categoryId)?.group==='Income');
+    if(negInc.length)add('low','Transactions',`${negInc.length} expense${negInc.length>1?'s':''} filed under an Income category`,'These show up as "Income" in the spending donut. Recategorise to what they actually were (a reversal goes to the category it refunded).','transactions',negInc.length);
+    // 13. stale balances
+    const staleBal=state.accounts.filter(a=>!a.archived&&!a.noTx&&a.history&&a.history.length&&daysBetween(a.history[a.history.length-1].date,today)>45);
+    if(staleBal.length)add('low','Accounts',`${staleBal.length} account balance${staleBal.length>1?'s':''} not updated in 45+ days`,`${staleBal.map(a=>a.name).join(', ')}. Net Worth and the running-balance column read from the card balance - update via the $ button after importing.`,'accounts',staleBal.length);
+    // 14. likely business account not flagged
+    const biz=state.accounts.filter(a=>!a.archived&&!a.excludeReports&&/business|pty|ltd|concepts|trading/i.test((a.name||'')+' '+(a.institution||'')));
+    if(biz.length)add('med','Accounts',`${biz.map(a=>a.name).join(', ')} look${biz.length>1?'':'s'} like a business account but counts as household spending`,'Tick "Business / not household" on the account so its activity stays out of Reports, Budget and Pay Split while the balance still counts in Net Worth.','accounts',biz.length);
+    // 15. closed-looking debts still open
+    const zero=debts.filter(d=>d.balance===0&&ENGINE.debtPayStats(d).count>0);
+    if(zero.length)add('low','Debts',`${zero.map(d=>d.name).join(', ')} at $0 but still open`,'If paid out, close it with the tick so it leaves Pay Split and the Payoff Planner and its bill leaves the transfer.','debts',zero.length);
+    // 16. backup age
+    const lastB=BACKUP.last('file');
+    if(!lastB||daysBetween(lastB.date,today)>35)add('low','Settings',lastB?`Last file backup ${daysBetween(lastB.date,today)} days ago`:'No file backup ever saved','Gist sync is a mirror, not a backup. Settings > Save file backup now.','settings',1);
+    // 17. duplicate bills (same keyword or same name)
+    const seen={};for(const b of act){const k=((b.matchKeyword||'').trim()||b.name).toUpperCase();if(!k)continue;(seen[k]=seen[k]||[]).push(b.name)}
+    const dupB=Object.values(seen).filter(v=>v.length>1);
+    if(dupB.length)add('med','Bills','Bills that look like duplicates',dupB.map(v=>v.join(' / ')).join('; ')+'. Two bills matching the same payment both count in the transfer and both try to advance.','bills',dupB.length);
+    const rank={high:0,med:1,low:2};
+    return out.sort((a,b)=>rank[a.sev]-rank[b.sev]);
   },
   billBackedCats(){
     const m={};
@@ -1422,6 +1491,8 @@ VIEWS.dashboard=()=>{
     ${statCard('This Month In',fmt(inc),'pos',fmtMY(mk+'-01')+' &middot; excl. transfers')}
     ${statCard('This Month Out',fmt(exp),exp>inc?'neg':'','Surplus '+fmtS(inc-exp)+(moved?' &middot; '+fmt0(moved)+' moved between accounts':''))}
   </div>`;
+  {const hc=ENGINE.healthCheck();const hi=hc.filter(i=>i.sev==='high').length;
+   if(hc.length)h+=`<div class="card" style="margin-bottom:14px;padding:10px 14px;display:flex;align-items:center;gap:12px;${hi?'border-color:var(--rd)':''}"><span class="badge ${hi?'rd':'am'}">HEALTH CHECK</span><span style="font-size:12.5px;flex:1">${hc.length} finding${hc.length>1?'s':''}${hi?` - ${hi} that bend Pay Split`:''}: ${esc(hc[0].title)}${hc.length>1?' and more':''}</span><button class="btn sm" data-action="nav" data-view="review">Open &rarr;</button></div>`;}
   h+=`<div class="grid g2">`;
   h+=`<div class="card"><h3>Net Worth Trend</h3>${nws.length>1?chart('dash-nw',el=>CH.line(el,{labels:nws.map(s=>fmtMY(s.mk+'-01')),series:[{name:'Net worth',color:CONFIG.colors.or,data:nws.map(s=>s.net)}],fillFirst:true,height:200})):emptyBox('\u03A3','Add accounts and take snapshots to build your net worth history.')}</div>`;
   h+=`<div class="card"><h3>Upcoming Bills <span class="r dim" style="font-family:var(--mono);font-size:11px">NEXT 14 DAYS</span></h3>`;
@@ -1681,7 +1752,47 @@ function txForm(t={}){
   </div>`;
 }
 
-/* ---------------- BILLS (weekly transfer calculator) ---------------- */
+/* ---------------- HEALTH CHECK ---------------- */
+VIEWS.review=()=>{
+  const issues=ENGINE.healthCheck();
+  const counts={high:0,med:0,low:0};issues.forEach(i=>counts[i.sev]++);
+  const sevBadge=s=>s==='high'?'<span class="badge rd">FIX</span>':s==='med'?'<span class="badge am">CHECK</span>':'<span class="badge">TIDY</span>';
+  let h=`<div class="grid g4" style="margin-bottom:14px">
+    ${statCard('Issues found',issues.length,issues.length?'':'pos',issues.length?`${counts.high} to fix &middot; ${counts.med} to check &middot; ${counts.low} tidy-ups`:'setup looks consistent')}
+    ${statCard('Weekly transfer',fmt(ENGINE.billsSummary().final),'',`${state.bills.filter(b=>b.active!==false).length} active bills`)}
+    ${statCard('Debt minimums',fmt(ENGINE.minimumsMonthly())+'/mo','',`${activeDebts().length} open debts`)}
+    ${(ps=>statCard('Pay Split surplus',fmtS(Math.round(ps.surplus||0))+'/mo',ps.surplus>=0?'pos':'neg','after bills, minimums, living spend'))(ENGINE.paySplit())}
+  </div>`;
+  h+=`<div class="card"><h3>Setup Review <span class="r dim" style="font-family:var(--mono);font-size:11px">RE-RUNS EVERY TIME YOU OPEN THIS PAGE</span></h3>
+  <p class="dim" style="font-size:12.5px;line-height:1.6;margin-bottom:12px">Every check here is arithmetic on your own data - the same double-counts, drifts and gaps that quietly bend Pay Split. Each item says where to go and what to change. ${state.settings.apiKey?'For a second opinion in plain English, ask Claude below.':'Add an Anthropic API key in Settings to also get a plain-English review.'}</p>`;
+  if(!issues.length)h+=`<div style="padding:18px;text-align:center;color:var(--gn);font-family:var(--mono)">&#10003; Nothing to flag. Bills, debts, transfers and categories all agree with each other.</div>`;
+  else{
+    h+='<table><thead><tr><th style="width:70px"></th><th style="width:110px">Area</th><th>Finding</th><th style="width:90px"></th></tr></thead><tbody>';
+    for(const i of issues)h+=`<tr><td>${sevBadge(i.sev)}</td><td class="mut">${esc(i.area)}</td><td><div style="font-weight:600">${esc(i.title)}</div><div class="dim" style="font-size:12px;line-height:1.55;margin-top:2px">${i.detail}</div></td><td><button class="btn sm" data-action="nav" data-view="${i.view}">Go &rarr;</button></td></tr>`;
+    h+='</tbody></table>';
+  }
+  h+='</div>';
+  if(state.settings.apiKey){
+    h+=`<div class="card"><h3>Ask Claude <span class="r dim" style="font-family:var(--mono);font-size:11px">USES YOUR API KEY &middot; SENDS TOTALS, NOT TRANSACTIONS</span></h3>
+      <p class="dim" style="font-size:12.5px;line-height:1.6;margin-bottom:10px">Sends a compact summary - income, bills register, debts, Pay Split lines, the findings above - and asks for anything the rules would not catch: a bill that looks mis-frequenced, a category that does not fit, a transfer that should be income, a number that looks implausible for a Perth household.</p>
+      <div class="pill-row"><button class="btn primary sm" data-action="review-ai" ${ui.reviewBusy?'disabled':''}>${ui.reviewBusy?'Reviewing...':'&#10022; Review my setup'}</button></div>
+      ${ui.reviewText?`<div style="margin-top:12px;font-size:13px;line-height:1.7;white-space:pre-wrap;border-top:1px solid var(--bd2);padding-top:12px">${esc(ui.reviewText)}</div>`:''}</div>`;
+  }
+  return h;
+};
+function reviewSummary(){
+  const s=ENGINE.billsSummary(),ps=ENGINE.paySplit();
+  return{
+    today:todayISO(),payCycle:state.settings.payCycle,
+    incomes:state.incomes.map(i=>({source:i.source||i.name,amount:i.amount/100,freq:i.freq})),
+    bills:state.bills.filter(b=>b.active!==false).map(b=>({name:b.name,category:(byId(state.categories,b.categoryId)||{}).name||'',group:(byId(state.categories,b.categoryId)||{}).group||'',freq:billFreqLabel(b),amount:b.amount/100,weekly:Math.round(ENGINE.billWeekly(b))/100,inTransfer:b.inTransfer!==false,debt:b.debtId?(byId(state.debts,b.debtId)||{}).name:'',auto:!!b.autoFrom,keyword:!!(b.matchKeyword||'').trim(),actualsAvg:(dr=>dr?dr.avg/100:null)(ENGINE.billDrift(b))})),
+    debts:activeDebts().map(d=>({name:d.name,type:d.type,balance:d.balance/100,rate:d.rate,minMonthly:Math.round(ENGINE.minMonthly(d))/100,viaBills:!!d.viaBills,actualsMonthly:(p=>p.count?Math.round(p.avgMo||0)/100:null)(ENGINE.debtPayStats(d))})),
+    accounts:state.accounts.filter(a=>!a.archived).map(a=>({name:a.name,type:a.type,balance:a.balance/100,business:!!a.excludeReports})),
+    paySplit:{incomeMonthly:ENGINE.incomeMonthly()/100,billsTransferMonthly:Math.round(s.final*52/12)/100,minimumsOutsideTransfer:Math.round(ps.mins||0)/100,livingSpendMonthly:Math.round(ps.spend||0)/100,livingSpendMode:state.settings.spendMode||'auto',surplusMonthly:Math.round(ps.surplus||0)/100},
+    spendByGroup3mo:(()=>{const o={};const since=addMonths(todayISO(),-3);for(const t of personalTx()){if(t.amount>=0||t.date<since)continue;const c=byId(state.categories,t.categoryId);const g=c?c.group:'Uncategorised';if(g==='Transfers')continue;o[g]=(o[g]||0)+(-t.amount)}return Object.fromEntries(Object.entries(o).map(([k,v])=>[k,Math.round(v/3)/100]))})(),
+    findings:ENGINE.healthCheck().map(i=>i.title)
+  };
+}
 VIEWS.bills=()=>{
   const s=ENGINE.billsSummary();
   const proj=ENGINE.billsProjection(12);
@@ -2755,6 +2866,18 @@ const ACTIONS={
     MODAL.close();save();render();toast('Bill saved - weekly transfer updated');
   },
   'bill-cat-period':el=>{ui.billCatPeriod=el.dataset.p;render()},
+  'review-ai':async()=>{
+    ui.reviewBusy=true;render();
+    try{
+      const prompt=`You are reviewing the setup of a personal finance app for an Australian household (amounts in AUD). Below is a JSON summary: income sources, the bills register (with weekly cost, whether each bill is funded by the weekly bills transfer, and actual average payments where known), open debts, accounts, the Pay Split lines, average monthly spend by category group over 3 months, and findings already flagged by rule checks.
+
+Review it the way a careful bookkeeper would and list what looks wrong or worth checking, most important first. Look for: double counting between bills and debt minimums or living spend; bills whose frequency or amount does not fit their name or their actuals; things filed as bills that are really spending allowances or savings; categories that do not fit; internal transfers that look like income or vice versa; implausible numbers; anything missing that a household like this would normally have (e.g. no car insurance but a car loan). Do not repeat the findings already listed unless you can add something. Be concrete: name the item and say what to change. Plain text, short paragraphs or a numbered list, no markdown headings, under 350 words.
+
+${JSON.stringify(reviewSummary())}`;
+      ui.reviewText=await aiCall([{role:'user',content:prompt}],1200);
+    }catch(e){ui.reviewText='Review failed - '+(e.message||e)}
+    ui.reviewBusy=false;render();
+  },
   'bill-group-toggle':el=>{ui.billCollapsed=ui.billCollapsed||{};const g=el.dataset.g;if(ui.billCollapsed[g])delete ui.billCollapsed[g];else ui.billCollapsed[g]=true;render()},
   'bill-group-all':el=>{
     if(el.dataset.mode==='expand'){ui.billCollapsed={};render();return}
