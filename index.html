@@ -260,7 +260,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-16.12';
+const BUILD='2026-09-16.13';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -644,7 +644,7 @@ const ENGINE={
      prove, so the list is the same each time and each item says what to do.
      Returns [{sev:'high'|'med'|'low', area, title, detail, view, count}]. */
   healthCheck(){
-    const out=[];const add=(sev,area,title,detail,view,count)=>out.push({sev,area,title,detail,view,count});
+    const out=[];const add=(sev,area,title,detail,view,count,ids)=>out.push({sev,area,title,detail,view,count,ids:ids||null});
     const today=todayISO(),cat=id=>byId(state.categories,id),acct=id=>byId(state.accounts,id);
     const act=state.bills.filter(b=>b.active!==false),debts=activeDebts();
     const cashAcct=a=>a&&acctType(a).asset&&!a.noTx&&!a.archived;
@@ -652,12 +652,12 @@ const ENGINE={
     if((state.settings.spendMode||'auto')!=='manual'){
       const dbl=act.filter(b=>b.inTransfer!==false&&cat(b.categoryId)?.group==='Transfers'&&!b.debtId&&!b.autoFrom);
       const dbl2=dbl.filter(b=>b.kind!=='living');
-      if(dbl2.length)add('high','Pay Split','Spending allowance filed as a bill',`${dbl2.map(b=>b.name).join(', ')} ${dbl2.length>1?'are':'is'} an internal transfer inside the weekly transfer, and Living spend is taken from actuals, which already counts what that money is spent on. Edit the bill and tick "living allowance" - it moves to the Living tab and becomes the living-spend line instead of being counted twice.`,'bills',dbl2.length);
+      if(dbl2.length)add('high','Pay Split','Spending allowance filed as a bill',`${dbl2.map(b=>b.name).join(', ')} ${dbl2.length>1?'are':'is'} an internal transfer inside the weekly transfer, and Living spend is taken from actuals, which already counts what that money is spent on. Edit the bill and tick "living allowance" - it moves to the Living tab and becomes the living-spend line instead of being counted twice.`,'bills',dbl2.length,dbl2.map(b=>b.id));
     }
     // 2. debt funded twice: viaBills auto bill AND a manual bill in the transfer linked to the same debt
     for(const d of debts){
       const manual=act.filter(b=>b.debtId===d.id&&!b.autoFrom&&b.inTransfer!==false);
-      if(d.viaBills&&manual.length)add('high','Debts',`${d.name} repayment counted twice`,`It is set to fund via bills (AUTO bill) and also has a manual bill in the transfer (${manual.map(b=>b.name).join(', ')}). Keep one.`,'debts',1);
+      if(d.viaBills&&manual.length)add('high','Debts',`${d.name} repayment counted twice`,`It is set to fund via bills (AUTO bill) and also has a manual bill in the transfer (${manual.map(b=>b.name).join(', ')}). Keep one.`,'bills',1,manual.map(b=>b.id).concat(state.bills.filter(b=>b.autoFrom===d.id).map(b=>b.id)));
     }
     // 3. debt minimum vs what is actually paid
     for(const d of debts){
@@ -666,13 +666,13 @@ const ENGINE={
     }
     // 4. bills drifting
     const drift=act.map(b=>({b,dr:ENGINE.billDrift(b)})).filter(x=>x.dr&&Math.abs(x.dr.pc)>10);
-    if(drift.length)add('med','Bills','Registered amounts out of step with actuals',drift.map(x=>`${x.b.name} ${x.dr.pc>0?'+':''}${x.dr.pc.toFixed(0)}% (avg ${fmt(x.dr.avg)})`).join('; ')+'. Fix the amounts so the weekly transfer is right.','bills',drift.length);
+    if(drift.length)add('med','Bills','Registered amounts out of step with actuals',drift.map(x=>`${x.b.name} ${x.dr.pc>0?'+':''}${x.dr.pc.toFixed(0)}% (avg ${fmt(x.dr.avg)})`).join('; ')+'. Fix the amounts so the weekly transfer is right.','bills',drift.length,drift.map(x=>x.b.id));
     // 5. bills with no keyword
     const nokw=act.filter(b=>!(b.matchKeyword||'').trim()&&!b.autoFrom&&b.freq!=='schedule'||(b.freq==='schedule'&&!(b.matchKeyword||'').trim()));
-    if(nokw.length)add('low','Bills',`${nokw.length} bill${nokw.length>1?'s have':' has'} no match keyword`,`${nokw.map(b=>b.name).join(', ')}. Without one, Last paid stays blank and the due date only moves when you press Paid.`,'bills',nokw.length);
+    if(nokw.length)add('low','Bills',`${nokw.length} bill${nokw.length>1?'s have':' has'} no match keyword`,`${nokw.map(b=>b.name).join(', ')}. Without one, Last paid stays blank and the due date only moves when you press Paid.`,'bills',nokw.length,nokw.map(b=>b.id));
     // 6. stale due dates: overdue > 14 days with a keyword (a payment should have matched)
     const stale=act.filter(b=>b.nextDue&&daysBetween(b.nextDue,today)>14&&!b.scheduleDone);
-    if(stale.length)add('med','Bills',`${stale.length} bill${stale.length>1?'s':''} overdue by more than two weeks`,`${stale.map(b=>`${b.name} (${fmtD(b.nextDue)})`).join(', ')}. Either the payment has not been imported, the keyword does not match the bank description, or the bill was cancelled - fix or press Paid.`,'bills',stale.length);
+    if(stale.length)add('med','Bills',`${stale.length} bill${stale.length>1?'s':''} overdue by more than two weeks`,`${stale.map(b=>`${b.name} (${fmtD(b.nextDue)})`).join(', ')}. Either the payment has not been imported, the keyword does not match the bank description, or the bill was cancelled - fix or press Paid.`,'bills',stale.length,stale.map(b=>b.id));
     // 7. bills account not set
     if(!state.settings.billsAccountId)add('med','Settings','No bills account selected','The 12-week projection and the transfer health check need to know which account the weekly transfer goes into. Settings > Bills account.','settings',1);
     // 8. no income
@@ -680,22 +680,22 @@ const ENGINE={
     // 9. uncategorised recent transactions
     const since=addMonths(today,-3);
     const unc=personalTx().filter(t=>!t.categoryId&&t.date>=since&&t.amount<0&&cashAcct(acct(t.accountId)));
-    if(unc.length){const big=unc.filter(t=>Math.abs(t.amount)>=100000);add(big.length?'high':'low','Transactions',`${unc.length} uncategorised expense${unc.length>1?'s':''} in the last 3 months${big.length?` including ${big.length} over $1,000`:''}`,`Uncategorised rows count as living spend in Pay Split and as "Uncategorised" in Reports. ${big.length?`Large ones (${big.slice(0,3).map(t=>`${fmt(Math.abs(t.amount))} ${t.payee}`).join('; ')}) are often loan payouts or transfers - categorise those first.`:'Run AI categorise or apply keyword rules.'}`,'transactions',unc.length);}
+    if(unc.length){const big=unc.filter(t=>Math.abs(t.amount)>=100000);add(big.length?'high':'low','Transactions',`${unc.length} uncategorised expense${unc.length>1?'s':''} in the last 3 months${big.length?` including ${big.length} over $1,000`:''}`,`Uncategorised rows count as living spend in Pay Split and as "Uncategorised" in Reports. ${big.length?`Large ones (${big.slice(0,3).map(t=>`${fmt(Math.abs(t.amount))} ${t.payee}`).join('; ')}) are often loan payouts or transfers - categorise those first.`:'Run AI categorise or apply keyword rules.'}`,'transactions',unc.length,unc.map(t=>t.id));}
     // 10. big non-transfer movements on cash accounts (refinance / drawdown miscategorised)
     const bigCash=personalTx().filter(t=>t.date>=since&&Math.abs(t.amount)>=1000000&&cashAcct(acct(t.accountId))&&cat(t.categoryId)&&cat(t.categoryId).group!=='Transfers'&&cat(t.categoryId).group!=='Income');
-    if(bigCash.length)add('med','Transactions',`${bigCash.length} transaction${bigCash.length>1?'s':''} over $10,000 categorised as spending`,`${bigCash.slice(0,4).map(t=>`${fmtD(t.date)} ${fmt(Math.abs(t.amount))} ${t.payee}`).join('; ')}. If these are loan drawdowns, payouts or moves between your own accounts they should be Transfers > Internal Transfer.`,'transactions',bigCash.length);
+    if(bigCash.length)add('med','Transactions',`${bigCash.length} transaction${bigCash.length>1?'s':''} over $10,000 categorised as spending`,`${bigCash.slice(0,4).map(t=>`${fmtD(t.date)} ${fmt(Math.abs(t.amount))} ${t.payee}`).join('; ')}. If these are loan drawdowns, payouts or moves between your own accounts they should be Transfers > Internal Transfer.`,'transactions',bigCash.length,bigCash.map(t=>t.id));
     // 11. loan-account credits not marked transfer (repayments read as income)
     const loanInc=state.transactions.filter(t=>{const a=acct(t.accountId);return a&&!acctType(a).asset&&t.amount>0&&t.date>=since&&cat(t.categoryId)&&cat(t.categoryId).group!=='Transfers'});
-    if(loanInc.length)add('med','Transactions',`${loanInc.length} loan-account credit${loanInc.length>1?'s':''} not categorised as Internal Transfer`,'Repayments arriving on a loan account are the mirror of money that left another account; categorise them Transfers > Internal Transfer so Reports do not double count.','transactions',loanInc.length);
+    if(loanInc.length)add('med','Transactions',`${loanInc.length} loan-account credit${loanInc.length>1?'s':''} not categorised as Internal Transfer`,'Repayments arriving on a loan account are the mirror of money that left another account; categorise them Transfers > Internal Transfer so Reports do not double count.','transactions',loanInc.length,loanInc.map(t=>t.id));
     // 11b. the same payment categorised as spending on two accounts (bills account -> everyday -> lender,
     //      both legs given the expense category) - shows as ~200% in Budget
     {const recent=personalTx().filter(t=>t.amount<0&&t.date>=since&&cashAcct(acct(t.accountId))&&cat(t.categoryId)&&!['Transfers','Income'].includes(cat(t.categoryId).group)).sort((x,y)=>x.date<y.date?-1:1);
      const pairs=[];const used=new Set();
      for(let i=0;i<recent.length;i++){const t=recent[i];if(used.has(t.id))continue;for(let j=i+1;j<recent.length;j++){const u=recent[j];if(daysBetween(t.date,u.date)>3)break;if(used.has(u.id)||u.accountId===t.accountId||u.categoryId!==t.categoryId)continue;if(Math.abs(Math.abs(u.amount)-Math.abs(t.amount))<=Math.max(100,Math.abs(t.amount)*0.01)){pairs.push([t,u]);used.add(t.id);used.add(u.id);break}}}
-     if(pairs.length)add('high','Transactions',`${pairs.length} payment${pairs.length>1?'s':''} categorised as spending on two accounts`,`Same amount, same category, different accounts within 3 days - the money passing through (e.g. bills account to Everyday to the lender) has been given the expense category on both legs, so Budget and Reports count it twice. First few: ${pairs.slice(0,3).map(([t,u])=>`${fmt(Math.abs(t.amount))} ${catShort(t.categoryId)} on ${acctName(t.accountId)} and ${acctName(u.accountId)}`).join('; ')}. Keep the category on the leg that reaches the payee; the other leg is Transfers > Internal Transfer.`,'transactions',pairs.length);}
+     if(pairs.length)add('high','Transactions',`${pairs.length} payment${pairs.length>1?'s':''} categorised as spending on two accounts`,`Same amount, same category, different accounts within 3 days - the money passing through (e.g. bills account to Everyday to the lender) has been given the expense category on both legs, so Budget and Reports count it twice. First few: ${pairs.slice(0,3).map(([t,u])=>`${fmt(Math.abs(t.amount))} ${catShort(t.categoryId)} on ${acctName(t.accountId)} and ${acctName(u.accountId)}`).join('; ')}. Keep the category on the leg that reaches the payee; the other leg is Transfers > Internal Transfer.`,'transactions',pairs.length,pairs.flatMap(([t,u])=>[t.id,u.id]));}
     // 12. income category on negative amounts
     const negInc=personalTx().filter(t=>t.amount<0&&t.date>=since&&cat(t.categoryId)?.group==='Income');
-    if(negInc.length)add('low','Transactions',`${negInc.length} expense${negInc.length>1?'s':''} filed under an Income category`,'These show up as "Income" in the spending donut. Recategorise to what they actually were (a reversal goes to the category it refunded).','transactions',negInc.length);
+    if(negInc.length)add('low','Transactions',`${negInc.length} expense${negInc.length>1?'s':''} filed under an Income category`,'These show up as "Income" in the spending donut. Recategorise to what they actually were (a reversal goes to the category it refunded).','transactions',negInc.length,negInc.map(t=>t.id));
     // 13. stale balances
     const staleBal=state.accounts.filter(a=>!a.archived&&!a.noTx&&a.history&&a.history.length&&daysBetween(a.history[a.history.length-1].date,today)>45);
     if(staleBal.length)add('low','Accounts',`${staleBal.length} account balance${staleBal.length>1?'s':''} not updated in 45+ days`,`${staleBal.map(a=>a.name).join(', ')}. Net Worth and the running-balance column read from the card balance - update via the $ button after importing.`,'accounts',staleBal.length);
@@ -711,7 +711,7 @@ const ENGINE={
     // 17. duplicate bills (same keyword or same name)
     const seen={};for(const b of act){const k=((b.matchKeyword||'').trim()||b.name).toUpperCase();if(!k)continue;(seen[k]=seen[k]||[]).push(b.name)}
     const dupB=Object.values(seen).filter(v=>v.length>1);
-    if(dupB.length)add('med','Bills','Bills that look like duplicates',dupB.map(v=>v.join(' / ')).join('; ')+'. Two bills matching the same payment both count in the transfer and both try to advance.','bills',dupB.length);
+    if(dupB.length)add('med','Bills','Bills that look like duplicates',dupB.map(v=>v.join(' / ')).join('; ')+'. Two bills matching the same payment both count in the transfer and both try to advance.','bills',dupB.length,act.filter(b=>{const k=((b.matchKeyword||'').trim()||b.name).toUpperCase();return seen[k]&&seen[k].length>1}).map(b=>b.id));
     const rank={high:0,med:1,low:2};
     return out.sort((a,b)=>rank[a.sev]-rank[b.sev]);
   },
@@ -1790,7 +1790,9 @@ function accountForm(a={}){
 /* ---------------- TRANSACTIONS ---------------- */
 function txFiltered(){
   const f=ui.txFilter;
+  const pin=f.ids?new Set(f.ids):null;
   let list=state.transactions.filter(t=>
+    (!pin||pin.has(t.id))&&
     (!f.account||t.accountId===f.account)&&
     (!f.category||t.categoryId===f.category)&&
     (!f.from||t.date>=f.from)&&(!f.to||t.date<=f.to)&&
@@ -1859,7 +1861,8 @@ VIEWS.transactions=()=>{
     <input data-input="tx-filter" data-k="q" value="${esc(f.q)}" placeholder="Search payee / notes / tags..." style="width:220px">
     ${(()=>{const tags=[...new Set(state.transactions.flatMap(t=>t.tags||[]))].sort();
       return tags.length?`<select data-change="tx-filter" data-k="tag" style="width:130px"><option value="">All tags</option>${tags.map(tg=>`<option value="${esc(tg)}" ${f.tag===tg?'selected':''}>${esc(tg)}</option>`).join('')}</select>`:''})()}
-    ${(f.account||f.category||f.from||f.to||f.q)?'<button class="btn sm ghost" data-action="tx-clear-filter">clear</button>':''}
+    ${f.ids?`<span class="badge am" title="${esc(f.pinLabel||'')}">HEALTH CHECK &middot; ${f.ids.length} ROWS</span>`:''}
+    ${(f.account||f.category||f.from||f.to||f.q||f.ids)?'<button class="btn sm ghost" data-action="tx-clear-filter">clear</button>':''}
   </div>`;
   if(upcoming.length){
     h+=`<div class="card" style="margin-bottom:14px;padding:10px 14px"><span class="sec-label">Upcoming recurring (30d): </span>`+
@@ -1931,7 +1934,7 @@ VIEWS.review=()=>{
   if(!issues.length)h+=`<div style="padding:18px;text-align:center;color:var(--gn);font-family:var(--mono)">&#10003; Nothing to flag. Bills, debts, transfers and categories all agree with each other.</div>`;
   else{
     h+='<table><thead><tr><th style="width:70px"></th><th style="width:110px">Area</th><th>Finding</th><th style="width:90px"></th></tr></thead><tbody>';
-    for(const i of issues)h+=`<tr><td>${sevBadge(i.sev)}</td><td class="mut">${esc(i.area)}</td><td><div style="font-weight:600">${esc(i.title)}</div><div class="dim" style="font-size:12px;line-height:1.55;margin-top:2px">${i.detail}</div></td><td><button class="btn sm" data-action="nav" data-view="${i.view}">Go &rarr;</button></td></tr>`;
+    for(const [idx,i] of issues.entries())h+=`<tr><td>${sevBadge(i.sev)}</td><td class="mut">${esc(i.area)}</td><td><div style="font-weight:600">${esc(i.title)}</div><div class="dim" style="font-size:12px;line-height:1.55;margin-top:2px">${i.detail}</div></td><td><button class="btn sm" data-action="${i.ids&&i.ids.length?'review-go':'nav'}" data-view="${i.view}" data-i="${idx}" title="${i.ids&&i.ids.length?'Open '+i.view+' filtered to just these '+i.ids.length+' rows':''}">Go${i.ids&&i.ids.length?' ('+i.ids.length+')':''} &rarr;</button></td></tr>`;
     h+='</tbody></table>';
   }
   h+='</div>';
@@ -2060,8 +2063,10 @@ VIEWS.bills=()=>{
       default:return '';
     }
   };
+  const bpin=bf.ids?new Set(bf.ids):null;
   let list=state.bills.filter(b=>
-    ((ui.billTab||'bills')==='living'?b.kind==='living':b.kind!=='living')&&
+    (!bpin||bpin.has(b.id))&&
+    (bpin||((ui.billTab||'bills')==='living'?b.kind==='living':b.kind!=='living'))&&
     (bf.status==='all'||(bf.status==='active'?b.active!==false:bf.status==='cancelled'?!!b.cancelled:(b.active===false&&!b.cancelled)))&&
     (!bf.freq||b.freq===bf.freq)&&
     (!bf.transfer||(bf.transfer==='in'?b.inTransfer!==false:b.inTransfer===false))&&
@@ -2083,7 +2088,8 @@ VIEWS.bills=()=>{
     <select data-change="bill-filter" data-k="transfer" style="width:150px"><option value="">In and out of transfer</option><option value="in" ${bf.transfer==='in'?'selected':''}>In transfer only</option><option value="out" ${bf.transfer==='out'?'selected':''}>Excluded only</option></select>
     <select data-change="bill-filter" data-k="status" style="width:110px"><option value="active" ${bf.status==='active'?'selected':''}>Active</option><option value="paused" ${bf.status==='paused'?'selected':''}>Paused</option><option value="cancelled" ${bf.status==='cancelled'?'selected':''}>Cancelled</option><option value="all" ${bf.status==='all'?'selected':''}>All</option></select>
     <input data-input="bill-filter" data-k="q" value="${esc(bf.q)}" placeholder="Search bills..." style="width:160px">
-    ${(bf.q||bf.freq||bf.transfer||bf.status!=='active')?'<button class="btn sm" data-action="bill-clear-filter">Clear</button>':''}
+    ${bf.ids?`<span class="badge am" title="${esc(bf.pinLabel||'')}">HEALTH CHECK &middot; ${bf.ids.length}</span>`:''}
+    ${(bf.q||bf.freq||bf.transfer||bf.status!=='active'||bf.ids)?'<button class="btn sm" data-action="bill-clear-filter">Clear</button>':''}
     ${ui.billGroup!=='none'?`<button class="btn sm" data-action="bill-group-all" data-mode="${Object.keys(ui.billCollapsed||{}).length?'expand':'collapse'}">${Object.keys(ui.billCollapsed||{}).length?'Expand all':'Collapse all'}</button>`:''}
     <span class="spacer"></span>
     <button class="btn sm" data-action="bill-report" title="Print-ready bills register: opens in a new tab, use Print / Save as PDF">&#9113; Report</button>
@@ -3056,6 +3062,13 @@ const ACTIONS={
     MODAL.close();save();render();toast('Bill saved - weekly transfer updated');
   },
   'bill-cat-period':el=>{ui.billCatPeriod=el.dataset.p;render()},
+  'review-go':el=>{
+    const i=ENGINE.healthCheck()[+el.dataset.i];if(!i)return;
+    if(i.view==='transactions'&&i.ids){ui.txFilter={account:'',category:'',from:'',to:'',q:'',tag:'',ids:i.ids,pinLabel:i.title};ui.txPage=0;ui.txSel.clear()}
+    else if(i.view==='bills'&&i.ids){ui.billFilter={q:'',freq:'',transfer:'',status:'all',ids:i.ids,pinLabel:i.title};ui.billCollapsed={}}
+    setView(i.view);
+    if(i.ids)toast(`Filtered to the ${i.ids.length} row${i.ids.length>1?'s':''} behind "${i.title}" - clear the filter when done`);
+  },
   'review-ai':async()=>{
     ui.reviewBusy=true;render();
     try{
