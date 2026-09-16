@@ -114,7 +114,8 @@ tr.grp td:first-child{border-left:3px solid var(--or)}
 tr.grp .cnt{font-family:var(--mono);font-size:10.5px;color:var(--tx3);margin-left:6px}
 tr.grp .car{display:inline-block;width:14px;color:var(--tx3);font-size:10px}
 tr.ln td{vertical-align:top;white-space:nowrap}tr.ln td:first-child{padding-left:22px;border-left:3px solid transparent;white-space:normal}
-tr.ln .meta{font-family:var(--mono);font-size:11px;margin-top:3px;line-height:1.4}tr.ln .meta .badge{vertical-align:middle}
+tr.ln .meta{font-family:var(--mono);font-size:11px;margin-top:3px;line-height:1.4}
+.linkish{cursor:pointer;border-bottom:1px dotted currentColor}.linkish:hover{color:var(--or)}tr.ln .meta .badge{vertical-align:middle}
 tr.ln.first td{padding-top:9px}
 tr.sub td{background:#121212;font-family:var(--mono);font-size:11.5px;color:var(--tx2);padding:5px 10px 7px;border-bottom:0}
 tr.sub td:first-child{border-left:3px solid transparent;padding-left:22px;font-family:var(--head);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--tx3)}
@@ -259,7 +260,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-16.10';
+const BUILD='2026-09-16.11';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -2192,7 +2193,7 @@ VIEWS.budget=()=>{
         <td class="r"><input data-change="budget-set" data-cat="${c.id}" value="${bv?(conv(bv)/100).toFixed(2):''}" placeholder="0.00" style="width:100px;text-align:right;background:transparent;border-color:#242424"></td>
         <td class="r mut">${bv?fmt(perFn?bv:bv*12/26):''}</td>
         <td class="r mut">${bv?fmt0(bv*12):''}</td>
-        <td class="r ${isInc?'pos':(p>1?'neg':'')}">${fmt(actual)}</td>
+        <td class="r ${isInc?'pos':(p>1?'neg':'')}"><span class="linkish" data-action="budget-drill" data-cat="${c.id}" data-cyc="${smooth?cyc:1}" title="Show the transactions behind this figure">${fmt(actual)}</span></td>
         <td><div class="pbar"><div class="${cls}" style="width:${clamp(p*100,0,100)}%"></div></div></td>
       </tr>`;
     }
@@ -3074,6 +3075,16 @@ ${JSON.stringify(reviewSummary())}`;
 
   /* ---- budget ---- */
   'budget-month':el=>{ui.budgetMonth=monthKey(addMonths(ui.budgetMonth+'-01',+el.dataset.d));render()},
+  /* click an Actual -> Transactions filtered to exactly the rows that made it:
+     this category, this month - widened back across the bill cycle when the
+     figure is a spread of lumpy payments */
+  'budget-drill':el=>{
+    const mk=ui.budgetMonth,cyc=Math.max(1,parseInt(el.dataset.cyc)||1);
+    const from=addMonths(mk+'-01',-(cyc-1)),to=addDays(addMonths(mk+'-01',1),-1);
+    ui.txFilter={account:'',category:el.dataset.cat,from,to,q:''};ui.txPage=0;
+    setView('transactions');
+    if(cyc>1)toast(`Showing ${cyc} months - this category's bill is paid every ${cyc} months, so ${fmtMY(mk+'-01')}'s figure spreads payments from ${fmtMY(from)} onward`);
+  },
   'budget-clear':async()=>{
     const mk=ui.budgetMonth,b=state.budgets[mk]||{};
     const cnt=Object.values(b).filter(v=>v).length;
