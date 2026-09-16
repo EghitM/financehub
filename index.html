@@ -113,12 +113,16 @@ tr.grp td{background:#161616;border-top:2px solid var(--bd2);border-bottom:1px s
 tr.grp td:first-child{border-left:3px solid var(--or)}
 tr.grp .cnt{font-family:var(--mono);font-size:10.5px;color:var(--tx3);margin-left:6px}
 tr.grp .car{display:inline-block;width:14px;color:var(--tx3);font-size:10px}
-tr.ln td:first-child{padding-left:22px;border-left:3px solid transparent}
+tr.ln td{vertical-align:top;white-space:nowrap}tr.ln td:first-child{padding-left:22px;border-left:3px solid transparent;white-space:normal}
+tr.ln .meta{font-family:var(--mono);font-size:11px;margin-top:3px;line-height:1.4}
 tr.ln.first td{padding-top:9px}
 tr.sub td{background:#121212;font-family:var(--mono);font-size:11.5px;color:var(--tx2);padding:5px 10px 7px;border-bottom:0}
 tr.sub td:first-child{border-left:3px solid transparent;padding-left:22px;font-family:var(--head);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--tx3)}
 tr.sub .num{font-weight:700;color:var(--tx)}
 tr.tot td{border-top:2px solid var(--or)}
+.receipt-zone{border:1px dashed var(--bd2);border-radius:8px;padding:10px 12px;margin-bottom:12px;background:#111;transition:border-color .15s,background .15s}
+.receipt-zone.over{border-color:var(--or);background:#1a150f}.receipt-zone.busy{border-style:solid;border-color:var(--am)}
+.rz-body{display:flex;gap:10px;align-items:center;font-size:12.5px}.rz-icon{color:var(--or);font-size:18px}
 tr:hover td{background:#191919}
 tr.tot td{border-top:1px solid var(--bd2);font-weight:700;color:var(--tx)}
 td.r,th.r{text-align:right}
@@ -254,7 +258,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-16.4';
+const BUILD='2026-09-16.6';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -271,7 +275,7 @@ const CONFIG = {
     {id:'weekly',n:'Weekly',wk:a=>a},{id:'fortnightly',n:'Fortnightly',wk:a=>a/2},
     {id:'monthly',n:'Monthly',wk:a=>a*12/52},{id:'quarterly',n:'Quarterly',wk:a=>a*4/52},
     {id:'halfyearly',n:'Half-yearly',wk:a=>a*2/52},{id:'annually',n:'Annually',wk:a=>a/52},
-    {id:'customN',n:'Every N weeks',wk:(a,n)=>a/(n||1)},
+    {id:'customN',n:'Custom (weeks)',wk:(a,n)=>a/(n||1)}, // displayed as "Every 8 weeks" via billFreqLabel
     {id:'schedule',n:'Instalment schedule',wk:a=>a/52} // amount = sum of the schedule (one billing year)
   ],
   recFreqs:[['weekly','Weekly'],['fortnightly','Fortnightly'],['monthly','Monthly'],['quarterly','Quarterly'],['annually','Annually']],
@@ -449,6 +453,22 @@ function sparkTrendColor(pts,isAssetAcct){
   return better?CONFIG.colors.gn:CONFIG.colors.rd;
 }
 function activeDebts(){return state.debts.filter(d=>!d.closed)}
+/* human frequency label: "Every 8 weeks", "Instalment schedule (4)", "Monthly" */
+function billFreqLabel(b){
+  if(b.freq==='customN'){const n=b.everyN||1;return n===1?'Every week':`Every ${n} weeks`}
+  if(b.freq==='schedule')return `Instalment schedule (${(b.schedule||[]).length})`;
+  const f=CONFIG.billFreqs.find(x=>x.id===b.freq);return f?f.n:b.freq;
+}
+/* one grey meta line per register row so every row has the same shape:
+   drift/actuals when payments are matched, instalments left for a schedule,
+   otherwise what is missing. Sentence case, mono figures. */
+function billMetaLine(b){
+  if(b.freq==='schedule'){const r=ENGINE.scheduleRemaining(b);return b.scheduleDone?{t:'All instalments paid',c:'var(--gn)'}:{t:`${r.count} of ${r.of} instalment${r.of===1?'':'s'} left &middot; ${fmt(r.total)} to go`,c:'var(--tx3)'}}
+  const dr=ENGINE.billDrift(b);
+  if(dr){const off=Math.abs(dr.pc)>10;return{t:`Actuals avg ${fmt(dr.avg)}${off?` &middot; ${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered`:''}`,c:off?'var(--am)':'var(--tx3)',title:off?'Update the amount so the weekly transfer matches what is really coming out':''}}
+  if(!(b.matchKeyword||'').trim())return{t:'No match keyword',c:'var(--tx3)',title:'Add a keyword so payments link, Last paid fills in and the due date advances itself'};
+  return{t:'No payments matched yet',c:'var(--tx3)'};
+}
 /* Accounts flagged excludeReports (e.g. a business trading account) are still
    real money for Net Worth, but their activity is not household spending, so
    every spending/income view - Reports, Budget, dashboard cash tiles, Pay
@@ -1319,7 +1339,7 @@ function billsReportHtml(){
   const incWk=Math.round(ENGINE.incomeMonthly()*12/52);
   const ps=incWk?ENGINE.paySplit():null;
   const wk=v=>Math.round(v*12/52);
-  const freqName=b=>{const f=CONFIG.billFreqs.find(x=>x.id===b.freq);return (f?f.n:b.freq)+(b.freq==='customN'?' ('+(b.everyN||1)+')':'')};
+  const freqName=billFreqLabel;
   const gKey=b=>{const c=byId(state.categories,b.categoryId);switch(ui.billGroup){case 'category':return c?c.name:'Uncategorised';case 'frequency':return freqName(b);case 'method':return b.method||'No method';case 'account':return b.accountId?acctName(b.accountId):'No account';case 'transfer':return b.inTransfer===false?'Not in weekly transfer':'In weekly transfer';case 'none':return '';default:return c?c.group:'Uncategorised'}};
   const groups=new Map();for(const b of act.slice().sort((a,b)=>ENGINE.billWeekly(b)-ENGINE.billWeekly(a))){const k=gKey(b);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(b)}
   const gsorted=[...groups.entries()].sort((a,b)=>sum(b[1].map(ENGINE.billWeekly))-sum(a[1].map(ENGINE.billWeekly)));
@@ -1638,7 +1658,13 @@ VIEWS.transactions=()=>{
   return h;
 };
 function txForm(t={}){
-  return`<div class="frow">
+  const ai=!!state.settings.apiKey;
+  return`<div id="receipt-zone" class="receipt-zone" ${ai?'':'style="opacity:.55"'} title="${ai?'Ctrl+V a snip, drop an image, or click to choose a file':'Add an Anthropic API key in Settings to read receipts'}">
+    <input type="file" id="receipt-file" accept="image/*,application/pdf" style="display:none">
+    <div class="rz-body"><span class="rz-icon">&#10022;</span><div><b>Read a receipt</b><div class="dim" style="font-size:11.5px">Paste a snip (Ctrl+V), drop an image, or <span class="acc" style="cursor:pointer;text-decoration:underline" data-action="receipt-pick">choose a file</span>. Fills in payee, date, amount and category.</div></div></div>
+    <div id="receipt-status" class="dim num" style="font-size:11.5px;margin-top:6px"></div>
+  </div>
+  <div class="frow">
     <label class="f"><span class="fl">Date</span><input type="date" name="date" value="${t.date||todayISO()}" required></label>
     <label class="f"><span class="fl">Account</span><select name="accountId">${acctOptions(t.accountId)}</select></label>
   </div>
@@ -1741,7 +1767,7 @@ VIEWS.bills=()=>{
   }
   // ---- register: filter / group / sort ----
   const bf=ui.billFilter;
-  const freqName=b=>{const f=CONFIG.billFreqs.find(x=>x.id===b.freq);return (f?f.n:b.freq)+(b.freq==='customN'?' ('+(b.everyN||1)+')':'')+(b.freq==='schedule'?' ('+(b.schedule||[]).length+')':'')};
+  const freqName=billFreqLabel;
   const gKey=b=>{
     const c=byId(state.categories,b.categoryId);
     switch(ui.billGroup){
@@ -1805,11 +1831,11 @@ VIEWS.bills=()=>{
       const f=CONFIG.billFreqs.find(x=>x.id===b.freq);
       h+=`<tr class="ln ${firstRow?'first':''}" style="${b.active===false?'opacity:.45':''}">`;firstRow=false;h+=`
         <td>${esc(b.name)}${b.cancelled?` <span class="badge" title="Cancelled${b.cancelledDate?' '+fmtD(b.cancelledDate):''} - kept for history">CANCELLED</span>`:b.active===false?' <span class="badge">PAUSED</span>':''}${b.inTransfer===false?' <span class="badge am" title="Not funded by the weekly transfer - paid from another account">NOT IN TRANSFER</span>':''}${b.debtId?` <span class="badge rd" title="Funds the repayment of '${esc((byId(state.debts,b.debtId)||{}).name||'')}' - Pay Split counts it once">&#9660; ${esc((byId(state.debts,b.debtId)||{}).name||'debt')}</span>`:''}${b.autoFrom?' <span class="badge" title="Managed by the debt - edit the amount or frequency on the debt itself">AUTO</span>':''}${b.notes?` <span class="dim" title="${esc(b.notes)}">&#9776;</span>`:''}
-          ${(dr=>dr?`<div class="num" style="font-size:11px;margin-top:2px;color:${Math.abs(dr.pc)>10?'var(--am)':'var(--tx3)'}">actuals avg ${fmt(dr.avg)}${Math.abs(dr.pc)>10?` (${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered - update amount to fix the weekly transfer)`:''}</div>`:'')(ENGINE.billDrift(b))}</td>
-        <td class="mut">${f?f.n:''}${b.freq==='customN'?' ('+(b.everyN||1)+')':''}${b.freq==='schedule'?(r=>` <span class="dim">(${r.of-r.count}/${r.of} paid)</span>`)(ENGINE.scheduleRemaining(b)):''}</td>
+          ${(mt=>`<div class="meta" style="color:${mt.c}" ${mt.title?`title="${esc(mt.title)}"`:''}>${mt.t}</div>`)(billMetaLine(b))}</td>
+        <td class="mut">${esc(billFreqLabel(b))}</td>
         <td class="mut">${esc(b.method||'')}</td>
         ${(lp=>`<td class="mut num" title="${lp?'From transactions: '+fmt(lp.total)+' on '+fmtD(lp.date):'No matching transaction yet - set a match keyword'}">${lp?fmtD(lp.date):'<span class="dim">\u2014</span>'}</td>`)(ENGINE.billLastPaid(b))}
-        <td class="mut">${b.scheduleDone?'<span class="badge gn">COMPLETE</span>':fmtD(b.nextDue)}${b.autoAdvance!==false&&(b.matchKeyword||'').trim()?'':' <span class="dim" title="No keyword or auto-advance off - due date only moves when you press Paid">&#8226;</span>'}${b.freq==='schedule'&&!b.scheduleDone?(r=>`<div class="dim num" style="font-size:11px">${r.count} left &middot; ${fmt(r.total)}</div>`)(ENGINE.scheduleRemaining(b)):''}</td>
+        <td class="mut">${b.scheduleDone?'<span class="badge gn">COMPLETE</span>':fmtD(b.nextDue)}${b.autoAdvance!==false&&(b.matchKeyword||'').trim()?'':' <span class="dim" title="No keyword or auto-advance off - the due date only moves when you press Paid">&#8226;</span>'}</td>
         <td class="r">${fmt(b.amount)}</td>
         <td class="r ${b.inTransfer===false?'mut':'acc'}">${b.inTransfer===false?'-':fmt(Math.round(ENGINE.billWeekly(b)))}</td>
         <td class="r">${fmt(Math.round(ENGINE.billAnnual(b)/12))}</td>
@@ -1842,7 +1868,7 @@ function billForm(b={}){
   <div class="frow3">
     <label class="f"><span class="fl">Amount $</span><input name="amount" value="${b.amount!=null?(b.amount/100).toFixed(2):''}" inputmode="decimal" required></label>
     <label class="f"><span class="fl">Frequency</span><select name="freq" data-change="bill-freq-toggle">${CONFIG.billFreqs.map(f=>`<option value="${f.id}" ${b.freq===f.id?'selected':''}>${f.n}</option>`).join('')}</select></label>
-    <label class="f" id="everyN-wrap" style="${b.freq==='customN'?'':'display:none'}"><span class="fl">Every N weeks</span><input name="everyN" type="number" min="1" value="${b.everyN||4}"></label>
+    <label class="f" id="everyN-wrap" style="${b.freq==='customN'?'':'display:none'}"><span class="fl">Every how many weeks?</span><input name="everyN" type="number" min="1" value="${b.everyN||4}"></label>
   </div>
   <div id="schedule-wrap" style="${b.freq==='schedule'?'':'display:none'};margin-bottom:8px">
     <label class="f"><span class="fl">Instalments - one per line: date, amount (add "paid" to tick one off)</span><textarea name="scheduleText" rows="5" style="font-family:var(--mono);font-size:12.5px" placeholder="15/09/2026 49.26 paid&#10;17/11/2026 619.66&#10;19/01/2027 619.66&#10;23/03/2027 619.66">${esc((b.schedule||[]).map(i=>fmtD(i.date)+' '+(i.amount/100).toFixed(2)+(i.paid?' paid':'')).join('\n'))}</textarea></label>
@@ -2578,6 +2604,7 @@ const ACTIONS={
 
   /* ---- transactions ---- */
   'tx-add':()=>{ui.editing=null;openForm('Add Transaction',txForm(),'tx-save')},
+  'receipt-pick':()=>{const f=$('#receipt-file');if(f)f.click()},
   'tx-edit':el=>{ui.editing=el.dataset.id;openForm('Edit Transaction',txForm(byId(state.transactions,el.dataset.id)),'tx-save')},
   'tx-save':()=>{
     const v=modalFormValues();
@@ -2731,14 +2758,14 @@ const ACTIONS={
   'bill-group-toggle':el=>{ui.billCollapsed=ui.billCollapsed||{};const g=el.dataset.g;if(ui.billCollapsed[g])delete ui.billCollapsed[g];else ui.billCollapsed[g]=true;render()},
   'bill-group-all':el=>{
     if(el.dataset.mode==='expand'){ui.billCollapsed={};render();return}
-    const gset={};for(const b of state.bills){const c=byId(state.categories,b.categoryId);let k;switch(ui.billGroup){case 'category':k=c?c.name:'Uncategorised';break;case 'frequency':k=(CONFIG.billFreqs.find(x=>x.id===b.freq)||{}).n||b.freq;break;case 'method':k=b.method||'No method';break;case 'account':k=b.accountId?acctName(b.accountId):'No account';break;case 'transfer':k=b.inTransfer===false?'Not in weekly transfer':'In weekly transfer';break;default:k=c?c.group:'Uncategorised'}gset[k]=true}
+    const gset={};for(const b of state.bills){const c=byId(state.categories,b.categoryId);let k;switch(ui.billGroup){case 'category':k=c?c.name:'Uncategorised';break;case 'frequency':k=billFreqLabel(b);break;case 'method':k=b.method||'No method';break;case 'account':k=b.accountId?acctName(b.accountId):'No account';break;case 'transfer':k=b.inTransfer===false?'Not in weekly transfer':'In weekly transfer';break;default:k=c?c.group:'Uncategorised'}gset[k]=true}
     ui.billCollapsed=gset;render();
   },
   'bill-csv':()=>{
     const rows=[['Bill','Category','Group','Frequency','Method','Account','Next due','Amount','Weekly','Monthly','Annual','In transfer','Status']];
     for(const b of state.bills.slice().sort((a,b)=>ENGINE.billWeekly(b)-ENGINE.billWeekly(a))){
       const c=byId(state.categories,b.categoryId);const f=CONFIG.billFreqs.find(x=>x.id===b.freq);
-      rows.push([b.name,c?c.name:'',c?c.group:'',(f?f.n:b.freq)+(b.freq==='customN'?' ('+(b.everyN||1)+')':''),b.method||'',b.accountId?acctName(b.accountId):'',b.nextDue||'',(b.amount/100).toFixed(2),(ENGINE.billWeekly(b)/100).toFixed(2),(ENGINE.billAnnual(b)/1200).toFixed(2),(ENGINE.billAnnual(b)/100).toFixed(2),b.inTransfer===false?'no':'yes',b.cancelled?'cancelled':b.active===false?'paused':'active']);
+      rows.push([b.name,c?c.name:'',c?c.group:'',billFreqLabel(b),b.method||'',b.accountId?acctName(b.accountId):'',b.nextDue||'',(b.amount/100).toFixed(2),(ENGINE.billWeekly(b)/100).toFixed(2),(ENGINE.billAnnual(b)/1200).toFixed(2),(ENGINE.billAnnual(b)/100).toFixed(2),b.inTransfer===false?'no':'yes',b.cancelled?'cancelled':b.active===false?'paused':'active']);
     }
     const csv=rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n');
     saveViaFS(`financehub-bills-${todayISO()}.csv`,csv,'CSV file','.csv','text/csv');
@@ -3411,6 +3438,16 @@ document.addEventListener('mousemove',e=>{
   }
 });
 $('#modal-layer').addEventListener('mousedown',e=>{if(e.target.id==='modal-layer')MODAL.close()});
+// receipt zone: paste anywhere in the Add/Edit Transaction modal, or drop/pick on the zone
+$('#modal-layer').addEventListener('paste',e=>{
+  if(!$('#receipt-zone'))return;
+  const item=[...(e.clipboardData?.items||[])].find(i=>i.type.startsWith('image/'));
+  if(item){e.preventDefault();receiptToForm(item.getAsFile())}
+});
+$('#modal-layer').addEventListener('dragover',e=>{const z=e.target.closest&&e.target.closest('#receipt-zone');if(z){e.preventDefault();z.classList.add('over')}});
+$('#modal-layer').addEventListener('dragleave',e=>{const z=e.target.closest&&e.target.closest('#receipt-zone');if(z)z.classList.remove('over')});
+$('#modal-layer').addEventListener('drop',e=>{const z=e.target.closest&&e.target.closest('#receipt-zone');if(!z)return;e.preventDefault();z.classList.remove('over');const f=e.dataTransfer?.files?.[0];if(f)receiptToForm(f)});
+$('#modal-layer').addEventListener('change',e=>{if(e.target.id==='receipt-file'&&e.target.files[0]){receiptToForm(e.target.files[0]);e.target.value=''}});
 
 /* ---- snapshots ---- */
 function takeSnapshot(force){
@@ -3710,6 +3747,44 @@ async function aiRun(makeRules,txList){
   }
   ui.ai.running=false;
   save();
+}
+/* ---- receipt reader ----
+   One image (snip, photo, PDF) -> {payee,date,amount,category,notes}. Fills
+   the open Add Transaction form; nothing is saved until the user presses Save,
+   so a misread is just a field to correct. */
+async function aiReadReceipt(file){
+  const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=()=>rej(new Error('Could not read image'));r.readAsDataURL(file)});
+  const isPdf=file.type==='application/pdf';
+  const block=isPdf?{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}}:{type:'image',source:{type:'base64',media_type:file.type||'image/png',data:b64}};
+  const cats=state.categories.map(c=>`${c.group} > ${c.name}`).join('; ');
+  const prompt=`This is a receipt, invoice or payment confirmation. Extract ONE transaction.
+Output ONLY a JSON object, no markdown fences: {"payee":"merchant name, short, as a bank statement would show it","date":"YYYY-MM-DD","total":"final amount paid as a positive number string","category":"one of the categories below, exactly as written, or empty","items":"up to 6 line items joined by ', ' or empty","refund":false}
+Categories: ${cats}
+Rules: dates are Australian DD/MM unless the receipt says otherwise; if no date, use today ${todayISO()}. Use the grand total actually paid (after discounts, including GST/surcharge). If it is a refund or credit set refund true.`;
+  const raw=await aiCall([{role:'user',content:[block,{type:'text',text:prompt}]}],600);
+  const clean=raw.replace(/```json|```/g,'').trim();
+  const j=JSON.parse(clean.slice(clean.indexOf('{'),clean.lastIndexOf('}')+1));
+  const total=parseFloat(String(j.total||'').replace(/[^0-9.]/g,''))||0;
+  let categoryId='';
+  if(j.category){const [g,nm]=String(j.category).split('>').map(x=>x.trim());const c=state.categories.find(c=>c.name.toLowerCase()===(nm||g||'').toLowerCase()&&(!nm||c.group.toLowerCase()===g.toLowerCase()))||state.categories.find(c=>c.name.toLowerCase()===(nm||g||'').toLowerCase());if(c)categoryId=c.id}
+  return{payee:String(j.payee||'').trim(),date:/^\d{4}-\d{2}-\d{2}$/.test(j.date||'')?j.date:todayISO(),amount:(j.refund?1:-1)*Math.round(total*100),categoryId,notes:String(j.items||'').trim()};
+}
+async function receiptToForm(file){
+  const zone=$('#receipt-zone'),st=$('#receipt-status');
+  if(!zone)return;
+  if(!state.settings.apiKey){toast('Add an Anthropic API key in Settings first');return}
+  if(!/^image\/|application\/pdf/.test(file.type)){toast('Paste or drop an image or PDF');return}
+  zone.classList.add('busy');st.textContent='Reading receipt...';
+  try{
+    const r=await aiReadReceipt(file);
+    const set=(name,v)=>{const el=$('#modal-layer [name='+name+']');if(el&&v!==undefined&&v!==null&&v!=='')el.value=v};
+    set('payee',r.payee);set('date',r.date);set('amount',(r.amount/100).toFixed(2));if(r.categoryId)set('categoryId',r.categoryId);
+    const notesEl=$('#modal-layer [name=notes]');if(notesEl&&r.notes&&!notesEl.value)notesEl.value=r.notes;
+    // keyword rules still win over the AI's guess, same as an import would
+    const ruled=ENGINE.applyRules(r.payee);if(ruled)set('categoryId',ruled);
+    st.innerHTML=`&#10003; Read: <b>${esc(r.payee)}</b> &middot; ${fmtD(r.date)} &middot; ${fmt(Math.abs(r.amount))}${r.amount>0?' (refund)':''} - check and press Save`;
+  }catch(e){st.textContent='Could not read that: '+(e.message||e)}
+  zone.classList.remove('busy');
 }
 async function aiExtractStatement(file){
   const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=()=>rej(new Error('Could not read file'));r.readAsDataURL(file)});
