@@ -260,7 +260,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-16.11';
+const BUILD='2026-09-16.12';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -419,7 +419,7 @@ const ui={
   payoffSel:[], payoffOpen:{}, chartHidden:{}, wiz:null, debtOpen:{}, navCollapsed:window.innerWidth<760,
   sensitivity:null, acctSort:'name', acctGroup:'institution', ai:null,
   billGroup:'catgroup', billSort:'weekly', billFilter:{q:'',freq:'',transfer:'',status:'active'},
-  showClosedDebts:false, showArchivedAccounts:false, cloudBackups:null
+  showClosedDebts:false, showArchivedAccounts:false, cloudBackups:null, billTab:'bills'
 };
 const persist=debounce(()=>DB.put(JSON.parse(JSON.stringify(state))),250);
 function reconcileDebtBalances(){
@@ -550,11 +550,16 @@ const ENGINE={
     const act=state.bills.filter(b=>b.active!==false&&b.inTransfer!==false);
     const excluded=state.bills.filter(b=>b.active!==false&&b.inTransfer===false).length;
     const wk=sum(act.map(ENGINE.billWeekly));
+    // living allowances (kind='living') are money you move too, so they sit
+    // inside the transfer - but they are spending envelopes, not commitments,
+    // so Pay Split treats them as the living-spend line, not the bills line
+    const livingWk=sum(act.filter(b=>b.kind==='living').map(ENGINE.billWeekly));
+    const billsWk=wk-livingWk;
     const buf=wk*(state.settings.billsBuffer||0)/100;
     let final=wk+buf;
     const r=state.settings.billsRound*100;
     if(r>0)final=Math.ceil(final/r)*r;
-    return {weekly:wk,buffer:buf,final,fortnightly:final*2,monthly:final*52/12,annual:wk*52,count:act.length,excluded};
+    return {weekly:wk,billsWeekly:billsWk,livingWeekly:livingWk,buffer:buf,final,fortnightly:final*2,monthly:final*52/12,annual:wk*52,count:act.length,livingCount:act.filter(b=>b.kind==='living').length,excluded};
   },
   /* Bills account: project 12 weeks -> weekly transfer in, bills out on due dates.
      Also computes min opening float needed so a zero-start never dips negative. */
@@ -591,7 +596,7 @@ const ENGINE={
   upcomingBills(days=30){
     const start=todayISO(),out=[];
     for(const b of state.bills.filter(b=>b.active!==false)){
-      if(!b.nextDue||(b.freq==='schedule'&&b.scheduleDone))continue;
+      if(!b.nextDue||(b.freq==='schedule'&&b.scheduleDone)||b.kind==='living')continue;
       const d=daysBetween(start,b.nextDue);
       if(d<=days)out.push({bill:b,days:d});
     }
@@ -646,7 +651,8 @@ const ENGINE={
     // 1. living spend counted twice: a Transfers-group bill in the weekly transfer while living spend comes from actuals
     if((state.settings.spendMode||'auto')!=='manual'){
       const dbl=act.filter(b=>b.inTransfer!==false&&cat(b.categoryId)?.group==='Transfers'&&!b.debtId&&!b.autoFrom);
-      if(dbl.length)add('high','Pay Split','Spending allowance counted twice',`${dbl.map(b=>b.name).join(', ')} ${dbl.length>1?'are':'is'} an internal transfer inside the weekly bills transfer, and Living spend is taken from actuals, which already counts what that money is spent on. Untick "in weekly transfer" on the bill, or switch Living spend to Manual at the allowance amount.`,'bills',dbl.length);
+      const dbl2=dbl.filter(b=>b.kind!=='living');
+      if(dbl2.length)add('high','Pay Split','Spending allowance filed as a bill',`${dbl2.map(b=>b.name).join(', ')} ${dbl2.length>1?'are':'is'} an internal transfer inside the weekly transfer, and Living spend is taken from actuals, which already counts what that money is spent on. Edit the bill and tick "living allowance" - it moves to the Living tab and becomes the living-spend line instead of being counted twice.`,'bills',dbl2.length);
     }
     // 2. debt funded twice: viaBills auto bill AND a manual bill in the transfer linked to the same debt
     for(const d of debts){
@@ -811,9 +817,24 @@ const ENGINE={
   freqMonthly(amount,freq){return Math.round(amount*({weekly:52,fortnightly:26,monthly:12,annually:1}[freq]||12)/12)},
   incomeMonthly(){return sum(state.incomes.map(i=>ENGINE.freqMonthly(i.amount,i.freq)))},
   billsMonthly(){return Math.round(ENGINE.billsSummary().final*52/12)},
+  /* Pay Split's bills line: commitments only - the living allowances inside
+     the transfer are reported on the living-spend line instead */
+  billsCommitMonthly(){const s=ENGINE.billsSummary();return Math.round(s.final*(s.weekly?s.billsWeekly/s.weekly:1)*52/12)},
+  livingAllowanceMonthly(){return Math.round(sum(state.bills.filter(b=>b.active!==false&&b.kind==='living').map(ENGINE.billWeekly))*52/12)},
+  /* actual living spend on the accounts the allowances land in (3-mo avg):
+     everything that is not a transfer, income or a bill-backed category */
+  livingActualMonthly(){
+    const acctIds=new Set(state.bills.filter(b=>b.active!==false&&b.kind==='living'&&b.toAccountId).map(b=>b.toAccountId));
+    const billCats=new Set(Object.keys(ENGINE.billBackedCats()));
+    let t=0;
+    for(let m=1;m<=3;m++){const mk=monthKey(addMonths(todayISO(),-m));
+      for(const tx of state.transactions){if(tx.amount>=0||monthKey(tx.date)!==mk||!acctIds.has(tx.accountId))continue;const c=byId(state.categories,tx.categoryId);if(c&&(c.group==='Income'||c.group==='Transfers'||billCats.has(tx.categoryId)))continue;t+=-tx.amount}}
+    return Math.round(t/3);
+  },
   minimumsMonthly(){return sum(activeDebts().map(d=>Math.round(ENGINE.minMonthly(d))))},
   budgetSpendMonthly(){
     if(state.settings.spendMode==='manual')return{amount:state.settings.spendManual||0,src:'manual'};
+    if(state.settings.spendMode==='allowance')return{amount:ENGINE.livingAllowanceMonthly(),src:'allowances'};
     if(state.settings.spendMode==='budget'){
       const t=ENGINE.budgetSpendFromBudget();
       return{amount:t,src:'budget'};
@@ -850,6 +871,8 @@ const ENGINE={
     return Math.round(t/n);
   },
   budgetSpendAuto(){
+    const la=ENGINE.livingAllowanceMonthly();
+    if(la>0)return{amount:la,src:'allowances'};
     const b=ENGINE.budgetSpendFromBudget();
     if(b>0)return{amount:b,src:'budget'};
     return{amount:ENGINE.budgetSpendFromActuals(),src:'actuals'};
@@ -890,7 +913,7 @@ const ENGINE={
   },
   paySplit(){
     const income=ENGINE.incomeMonthly();
-    const bills=ENGINE.billsMonthly();
+    const bills=ENGINE.billsCommitMonthly();
     // a debt whose repayment is routed through the bills account (bill linked
     // via "Funds debt repayment of", still in the transfer) is already inside
     // the bills line - excluding its minimum here prevents the double count
@@ -1437,7 +1460,7 @@ function billsReportHtml(){
   for(const [g,bills] of gsorted){
     const gw=sum(bills.filter(b=>b.inTransfer!==false).map(ENGINE.billWeekly)),ga=sum(bills.map(ENGINE.billAnnual));
     if(g!=='')body+=`<tr class="g"><td colspan="6">${esc(g)} <span class="dim">${bills.length}</span></td><td class="r">${m(gw)}</td><td class="r">${m(ga/12)}</td><td class="r">${fmt0(ga)}</td></tr>`;
-    for(const b of bills)body+=`<tr><td>${esc(b.name)}${b.inTransfer===false?' <span class="tag">outside transfer</span>':''}</td><td class="mut">${esc(freqName(b))}</td><td class="mut">${esc(b.method||'')}</td><td class="mut">${(lp=>lp?fmtD(lp.date):'-')(ENGINE.billLastPaid(b))}</td><td class="mut">${fmtD(b.nextDue)}</td><td class="r">${fmt(b.amount)}</td><td class="r">${b.inTransfer===false?'-':m(ENGINE.billWeekly(b))}</td><td class="r">${m(ENGINE.billAnnual(b)/12)}</td><td class="r">${fmt0(ENGINE.billAnnual(b))}</td></tr>`;
+    for(const b of bills)body+=`<tr><td>${esc(b.name)}${b.kind==='living'?' <span class="tag">living</span>':''}${b.inTransfer===false?' <span class="tag">outside transfer</span>':''}</td><td class="mut">${esc(freqName(b))}</td><td class="mut">${esc(b.method||'')}</td><td class="mut">${(lp=>lp?fmtD(lp.date):'-')(ENGINE.billLastPaid(b))}</td><td class="mut">${fmtD(b.nextDue)}</td><td class="r">${fmt(b.amount)}</td><td class="r">${b.inTransfer===false?'-':m(ENGINE.billWeekly(b))}</td><td class="r">${m(ENGINE.billAnnual(b)/12)}</td><td class="r">${fmt0(ENGINE.billAnnual(b))}</td></tr>`;
   }
   body+=`<tr class="t"><td colspan="6">Total</td><td class="r">${m(s.weekly)}</td><td class="r">${m(s.annual/12)}</td><td class="r">${fmt0(s.annual)}</td></tr></tbody></table>`;
   body+=`<div class="two"><div><h2>Annual cost by category</h2><table><tbody>${cats.map(([k,v])=>`<tr><td>${esc(k)}</td><td class="r">${m(v/52)}/wk</td><td class="r">${m(v/12)}/mo</td><td class="r">${fmt0(v)}</td><td class="r mut">${(v/s.annual*100).toFixed(0)}%</td></tr>`).join('')}</tbody></table></div>
@@ -1946,6 +1969,7 @@ VIEWS.bills=()=>{
     </div>
     <div class="alt"><div class="l">Fortnightly</div><div class="v">${fmt(s.fortnightly)}</div></div>
     <div class="alt"><div class="l">Monthly</div><div class="v">${fmt(s.monthly)}</div></div>
+    ${s.livingWeekly?`<div class="alt"><div class="l">Of which living</div><div class="v" style="color:var(--bl)">${fmt(Math.round(s.livingWeekly))}</div><div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:2px">bills ${fmt(Math.round(s.billsWeekly))} + living ${fmt(Math.round(s.livingWeekly))}</div></div>`:''}
     <div class="alt"><div class="l">Annual Bills</div><div class="v">${fmt0(s.annual)}</div></div>
     ${(()=>{const incWk=Math.round(ENGINE.incomeMonthly()*12/52);
       if(!incWk)return '';
@@ -1964,7 +1988,12 @@ VIEWS.bills=()=>{
       </div>
     </div>
   </div>`;
-  h+=`<div class="toolbar"><button class="btn primary" data-action="bill-add">+ Add Bill</button>
+  const tab=ui.billTab||'bills';
+  const livingAll=state.bills.filter(b=>b.kind==='living');
+  h+=`<div class="toolbar">
+    <button class="btn ${tab==='bills'?'primary':''}" data-action="bill-tab" data-tab="bills">Bills <span class="badge" style="margin-left:4px">${state.bills.filter(b=>b.kind!=='living'&&b.active!==false).length}</span></button>
+    <button class="btn ${tab==='living'?'primary':''}" data-action="bill-tab" data-tab="living" title="Spending allowances - regular money you move to a spending pot (Revolut, groceries, haircuts). In the weekly transfer, but Pay Split treats them as living spend, not commitments.">Living <span class="badge" style="margin-left:4px">${livingAll.filter(b=>b.active!==false).length}</span></button>
+    <button class="btn" data-action="${tab==='living'?'living-add':'bill-add'}">+ Add ${tab==='living'?'allowance':'bill'}</button>
     <span class="spacer"></span>
     <span class="sec-label">Bills account:</span>
     <select data-change="bills-account" style="width:190px">${acctOptions(state.settings.billsAccountId)}</select></div>`;
@@ -2032,6 +2061,7 @@ VIEWS.bills=()=>{
     }
   };
   let list=state.bills.filter(b=>
+    ((ui.billTab||'bills')==='living'?b.kind==='living':b.kind!=='living')&&
     (bf.status==='all'||(bf.status==='active'?b.active!==false:bf.status==='cancelled'?!!b.cancelled:(b.active===false&&!b.cancelled)))&&
     (!bf.freq||b.freq===bf.freq)&&
     (!bf.transfer||(bf.transfer==='in'?b.inTransfer!==false:b.inTransfer===false))&&
@@ -2063,7 +2093,15 @@ VIEWS.bills=()=>{
   for(const b of list){const k=gKey(b);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(b)}
   const shownWk=sum(list.filter(b=>b.active!==false&&b.inTransfer!==false).map(b=>ENGINE.billWeekly(b)));
   const shownAn=sum(list.filter(b=>b.active!==false).map(b=>ENGINE.billAnnual(b)));
-  h+=`<div class="card pad0"><table><thead><tr><th>Bill</th><th>Frequency</th><th>Method</th><th>Last paid</th><th>Next due</th><th class="r">Amount</th><th class="r" title="Amount normalised to a week: monthly x 12 / 52, quarterly x 4 / 52, annual / 52">Weekly</th><th class="r" title="Annual / 12">Monthly</th><th class="r">Annual</th><th></th></tr></thead><tbody>`;
+  if((ui.billTab||'bills')==='living'){
+    const la=ENGINE.livingAllowanceMonthly(),act3=ENGINE.livingActualMonthly(),pots=[...new Set(state.bills.filter(b=>b.active!==false&&b.kind==='living'&&b.toAccountId).map(b=>b.toAccountId))];
+    const p=la?act3/la:0;
+    h+=`<div class="card" style="margin-bottom:14px"><h3>Living Allowances vs Actual Spend <span class="r dim" style="font-family:var(--mono);font-size:11px">3 MONTH AVERAGE</span></h3>
+      <div class="grid g3" style="margin-bottom:10px">${statCard('Allowances',fmt(la)+'/mo','',fmt(Math.round(la*12/52))+'/wk moved to pots')}${statCard('Actually spent',fmt(act3)+'/mo',p>1.05?'neg':'pos',pots.length?'on '+pots.map(acctName).join(', '):'set "lands in account" on each allowance')}${statCard(p>1?'Over allowance':'Under allowance',la?fmtS(la-act3)+'/mo':'\u2014',p>1?'neg':'pos',la?Math.round(p*100)+'% used':'')}</div>
+      <div class="pbar"><div class="${p>1?'over':p>0.85?'warn':''}" style="width:${clamp(p*100,0,100)}%"></div></div>
+      <p class="dim" style="font-size:12px;line-height:1.6;margin-top:10px">These are spending envelopes, not commitments: they sit inside the weekly transfer because you move the money, but Pay Split reports them as the living-spend line (mode "Living allowances") rather than as bills, so nothing is counted twice. Actual spend is everything on the pot accounts that is not a transfer, income or a bill-backed category.</p></div>`;
+  }
+  h+=`<div class="card pad0"><table><thead><tr><th>${(ui.billTab||'bills')==='living'?'Allowance':'Bill'}</th><th>Frequency</th><th>Method</th><th>Last paid</th><th>Next due</th><th class="r">Amount</th><th class="r" title="Amount normalised to a week: monthly x 12 / 52, quarterly x 4 / 52, annual / 52">Weekly</th><th class="r" title="Annual / 12">Monthly</th><th class="r">Annual</th><th></th></tr></thead><tbody>`;
   if(!list.length)h+=`<tr><td colspan="10" class="dim" style="padding:18px">No bills match these filters.</td></tr>`;
   for(const [g,bills] of [...groups.entries()].sort((a,b)=>{
       if(ui.billGroup==='none')return 0;
@@ -2096,7 +2134,7 @@ VIEWS.bills=()=>{
     }
     if(g!==''&&bills.length>1)h+=`<tr class="sub"><td colspan="6">Subtotal &middot; ${esc(g)}</td><td class="r num">${fmt(Math.round(gw))}</td><td class="r num">${fmt(Math.round(ga/12))}</td><td class="r num">${fmt0(ga)}</td><td></td></tr>`;
   }
-  const filtered=list.length!==state.bills.length;
+  const filtered=list.length!==state.bills.filter(b=>(ui.billTab||'bills')==='living'?b.kind==='living':b.kind!=='living').length;
   h+=`<tr class="tot"><td colspan="5">${filtered?'TOTAL (SHOWN)':'TOTAL (ACTIVE)'}</td><td></td><td class="r acc">${fmt(Math.round(shownWk))}</td><td class="r">${fmt(Math.round(shownAn/12))}</td><td class="r">${fmt0(shownAn)}</td><td></td></tr>`;
   if(filtered)h+=`<tr><td colspan="5" class="dim" style="font-size:11.5px">All active bills: ${fmt(Math.round(s.weekly))}/wk &middot; ${fmt0(s.annual)}/yr</td><td></td><td class="r dim num" style="font-size:11.5px">${fmt(Math.round(s.weekly))}</td><td class="r dim num" style="font-size:11.5px">${fmt(Math.round(s.annual/12))}</td><td class="r dim num" style="font-size:11.5px">${fmt0(s.annual)}</td><td></td></tr>`;
   h+='</tbody></table></div>';
@@ -2112,6 +2150,10 @@ function billForm(b={}){
     <label class="f" style="align-self:end"><span class="chk"><input type="checkbox" name="autoAdvance" ${b.autoAdvance!==false?'checked':''}> Auto-advance due date when a matching payment appears</span></label>
   </div>
   <label class="chk" style="margin-bottom:10px"><input type="checkbox" name="inTransfer" ${b.inTransfer!==false?'checked':''}> Include in weekly transfer (this bill is paid FROM the bills account)</label>
+  <div class="frow" style="align-items:end;margin-bottom:10px">
+    <label class="chk" style="flex:1"><input type="checkbox" name="living" ${b.kind==='living'?'checked':''} data-change="bill-living-toggle"> Living allowance - spending money moved to a pot (Revolut, groceries), not a commitment. Shows on the Living tab; Pay Split counts it as living spend, not as a bill.</label>
+    <label class="f" id="living-acct-wrap" style="${b.kind==='living'?'':'display:none'};min-width:200px"><span class="fl">Lands in account (to track actual spend)</span><select name="toAccountId">${acctOptions(b.toAccountId||'')}</select></label>
+  </div>
   <div class="frow" style="margin-bottom:6px">
     <label class="f"><span class="fl">Funds debt repayment of</span><select name="debtId">${debtOptions(b.debtId,'- none, ordinary bill -')}</select></label>
   </div>
@@ -2369,6 +2411,7 @@ VIEWS.paysplit=()=>{
                 <option value="auto" ${md==='auto'?'selected':''}>Auto (budget, else actuals)</option>
                 <option value="budget" ${md==='budget'?'selected':''}>This month's budget</option>
                 <option value="actuals" ${md==='actuals'?'selected':''}>Recent actuals average</option>
+                <option value="allowance" ${md==='allowance'?'selected':''}>Living allowances (Bills > Living)</option>
                 <option value="manual" ${md==='manual'?'selected':''}>Manual amount</option>
               </select>
               ${md==='manual'
@@ -2972,6 +3015,8 @@ const ACTIONS={
 
   /* ---- bills ---- */
   'bill-add':()=>{ui.editing=null;openForm('Add Bill',billForm(),'bill-save')},
+  'living-add':()=>{ui.editing=null;openForm('Add Living Allowance',billForm({kind:'living',freq:'weekly',categoryId:(state.categories.find(c=>c.group==='Transfers')||{}).id||''}),'bill-save')},
+  'bill-tab':el=>{ui.billTab=el.dataset.tab;ui.billCollapsed={};render()},
   'bill-clear-filter':()=>{ui.billFilter={q:'',freq:'',transfer:'',status:'active'};render()},
   'tx-to-bill':el=>{
     const t=byId(state.transactions,el.dataset.id);if(!t)return;
@@ -2990,7 +3035,7 @@ const ACTIONS={
   'bill-save':()=>{
     const v=modalFormValues();
     if(!v.name.trim())return toast('Bill name is required');
-    const rec={name:v.name.trim(),categoryId:v.categoryId,amount:cents(v.amount),freq:v.freq,everyN:Math.max(1,parseInt(v.everyN)||1),nextDue:v.nextDue,accountId:v.accountId,method:v.method,notes:v.notes.trim(),matchKeyword:(v.matchKeyword||'').trim(),autoAdvance:!!v.autoAdvance,inTransfer:!!v.inTransfer,debtId:v.debtId||'',active:!!v.active};
+    const rec={name:v.name.trim(),categoryId:v.categoryId,amount:cents(v.amount),freq:v.freq,everyN:Math.max(1,parseInt(v.everyN)||1),nextDue:v.nextDue,accountId:v.accountId,method:v.method,notes:v.notes.trim(),matchKeyword:(v.matchKeyword||'').trim(),autoAdvance:!!v.autoAdvance,inTransfer:!!v.inTransfer,kind:v.living?'living':'bill',toAccountId:v.living?(v.toAccountId||''):'',debtId:v.debtId||'',active:!!v.active};
     if(rec.freq==='schedule'){
       const prev=ui.editing?((byId(state.bills,ui.editing)||{}).schedule||[]):[];
       const lines=String(v.scheduleText||'').split('\n').map(l=>l.trim()).filter(Boolean);
@@ -3419,6 +3464,7 @@ const CHANGES={
   'bills-buffer':el=>{state.settings.billsBuffer=clamp(parseFloat(el.value)||0,0,50);save();render()},
   'bills-round':el=>{state.settings.billsRound=+el.value;save();render()},
   'bills-account':el=>{state.settings.billsAccountId=el.value;save();render()},
+  'bill-living-toggle':el=>{const w=$('#living-acct-wrap');if(w)w.style.display=el.checked?'':'none'},
   'bill-freq-toggle':el=>{const w=$('#everyN-wrap');if(w)w.style.display=el.value==='customN'?'':'none';const s=$('#schedule-wrap');if(s)s.style.display=el.value==='schedule'?'':'none'},
   'budget-mode':el=>{ui.budgetMode=el.value;render()},
   'budget-smooth':el=>{ui.budgetSmooth=el.checked;render()},
