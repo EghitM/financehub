@@ -107,6 +107,18 @@ th{font-family:var(--head);font-size:11px;text-transform:uppercase;letter-spacin
 th.sortable{cursor:pointer}
 th.sortable:hover{color:var(--or)}
 td{padding:7px 10px;border-bottom:1px solid #1f1f1f;vertical-align:middle}
+table.compact td{padding:4px 8px;font-size:12.5px}table.compact .btn.sm{padding:2px 8px;font-size:10.5px}
+/* grouped bills register: header band, indented lines, subtotal rule */
+tr.grp td{background:#161616;border-top:2px solid var(--bd2);border-bottom:1px solid #222;padding:9px 10px 6px;cursor:pointer;user-select:none}
+tr.grp td:first-child{border-left:3px solid var(--or)}
+tr.grp .cnt{font-family:var(--mono);font-size:10.5px;color:var(--tx3);margin-left:6px}
+tr.grp .car{display:inline-block;width:14px;color:var(--tx3);font-size:10px}
+tr.ln td:first-child{padding-left:22px;border-left:3px solid transparent}
+tr.ln.first td{padding-top:9px}
+tr.sub td{background:#121212;font-family:var(--mono);font-size:11.5px;color:var(--tx2);padding:5px 10px 7px;border-bottom:0}
+tr.sub td:first-child{border-left:3px solid transparent;padding-left:22px;font-family:var(--head);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--tx3)}
+tr.sub .num{font-weight:700;color:var(--tx)}
+tr.tot td{border-top:2px solid var(--or)}
 tr:hover td{background:#191919}
 tr.tot td{border-top:1px solid var(--bd2);font-weight:700;color:var(--tx)}
 td.r,th.r{text-align:right}
@@ -242,7 +254,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-15.8';
+const BUILD='2026-09-16.4';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -259,7 +271,8 @@ const CONFIG = {
     {id:'weekly',n:'Weekly',wk:a=>a},{id:'fortnightly',n:'Fortnightly',wk:a=>a/2},
     {id:'monthly',n:'Monthly',wk:a=>a*12/52},{id:'quarterly',n:'Quarterly',wk:a=>a*4/52},
     {id:'halfyearly',n:'Half-yearly',wk:a=>a*2/52},{id:'annually',n:'Annually',wk:a=>a/52},
-    {id:'customN',n:'Every N weeks',wk:(a,n)=>a/(n||1)}
+    {id:'customN',n:'Every N weeks',wk:(a,n)=>a/(n||1)},
+    {id:'schedule',n:'Instalment schedule',wk:a=>a/52} // amount = sum of the schedule (one billing year)
   ],
   recFreqs:[['weekly','Weekly'],['fortnightly','Fortnightly'],['monthly','Monthly'],['quarterly','Quarterly'],['annually','Annually']],
   payFreqs:[['weekly','Weekly',52],['fortnightly','Fortnightly',26],['monthly','Monthly',12]],
@@ -436,6 +449,12 @@ function sparkTrendColor(pts,isAssetAcct){
   return better?CONFIG.colors.gn:CONFIG.colors.rd;
 }
 function activeDebts(){return state.debts.filter(d=>!d.closed)}
+/* Accounts flagged excludeReports (e.g. a business trading account) are still
+   real money for Net Worth, but their activity is not household spending, so
+   every spending/income view - Reports, Budget, dashboard cash tiles, Pay
+   Split living spend - reads through this filter instead of state.transactions */
+function isExcludedTx(t){const a=byId(state.accounts,t.accountId);return !!(a&&a.excludeReports)}
+function personalTx(){return state.transactions.filter(t=>!isExcludedTx(t))}
 /* ---- close-out ----
    Closed debts and archived accounts stay in the ledger for history
    (repayment records, balance history, transactions) but drop out of every
@@ -476,8 +495,29 @@ function acctOptions(sel,filter){let list=activeAccounts().filter(a=>!a.noTx||a.
 const ENGINE={
   /* ---- Bills: exact annualised weekly cost (cents) ---- */
   billWeekly(b){
+    if(b.freq==='schedule')return sum((b.schedule||[]).map(i=>i.amount))/52;
     const f=CONFIG.billFreqs.find(x=>x.id===b.freq)||CONFIG.billFreqs[2];
     return f.wk(b.amount,b.everyN);
+  },
+  /* ---- instalment schedules ----
+     A 'schedule' bill is a dated list of instalments (rates notice, school
+     fees, a payment plan) with different amounts and fixed dates. The bill's
+     nextDue/amount always mirror the next unpaid instalment so every view
+     that reads b.nextDue/b.amount keeps working; the annual figure is the
+     sum of the whole schedule (a notice covers one billing year). */
+  scheduleSync(b){
+    const s=(b.schedule||[]).slice().sort((x,y)=>x.date<y.date?-1:1);b.schedule=s;
+    const nxt=s.find(i=>!i.paid);
+    if(nxt){b.nextDue=nxt.date;b.amount=nxt.amount;b.scheduleDone=false}
+    else if(s.length){b.nextDue=s[s.length-1].date;b.amount=0;b.scheduleDone=true}
+    return b;
+  },
+  scheduleRemaining(b){const r=(b.schedule||[]).filter(i=>!i.paid);return{count:r.length,total:sum(r.map(i=>i.amount)),of:(b.schedule||[]).length}},
+  /* advance one payment: schedules tick the current instalment off, everything
+     else rolls the due date one cycle forward */
+  billAdvance(b){
+    if(b.freq==='schedule'){const i=(b.schedule||[]).find(x=>!x.paid);if(i)i.paid=true;ENGINE.scheduleSync(b);return}
+    b.nextDue=advanceBill(b.nextDue,b.freq,b.everyN);
   },
   billAnnual(b){return ENGINE.billWeekly(b)*52},
   billMonthly(b){return ENGINE.billWeekly(b)*52/12},
@@ -503,6 +543,10 @@ const ENGINE={
     const start=todayISO();
     const events=[]; // due bills in horizon
     for(const b of state.bills.filter(b=>b.active!==false&&b.inTransfer!==false)){
+      if(b.freq==='schedule'){
+        for(const i of (b.schedule||[]))if(!i.paid){const d=daysBetween(start,i.date);if(d>=0&&d<weeks*7)events.push({day:d,name:b.name,amount:i.amount})}
+        continue;
+      }
       let due=b.nextDue||start;
       let guard=0;
       while(daysBetween(start,due)<0&&guard++<400)due=advanceBill(due,b.freq,b.everyN); // catch up overdue for projection
@@ -525,7 +569,7 @@ const ENGINE={
   upcomingBills(days=30){
     const start=todayISO(),out=[];
     for(const b of state.bills.filter(b=>b.active!==false)){
-      if(!b.nextDue)continue;
+      if(!b.nextDue||(b.freq==='schedule'&&b.scheduleDone))continue;
       const d=daysBetween(start,b.nextDue);
       if(d<=days)out.push({bill:b,days:d});
     }
@@ -534,7 +578,7 @@ const ENGINE={
   /* ---- Budget ---- */
   monthActuals(mk){
     const out={};
-    for(const t of state.transactions){
+    for(const t of personalTx()){
       if(monthKey(t.date)!==mk)continue;
       out[t.categoryId||'_u']=(out[t.categoryId||'_u']||0)+t.amount;
     }
@@ -548,6 +592,7 @@ const ENGINE={
     const m={weekly:1,fortnightly:1,monthly:1,quarterly:3,halfyearly:6,annually:12}[b.freq];
     if(m)return m;
     if(b.freq==='customN')return Math.max(1,Math.round((b.everyN||1)*7/30.44));
+    if(b.freq==='schedule'){const s=b.schedule||[];if(s.length<2)return 3;const span=daysBetween(s[0].date,s[s.length-1].date);return clamp(Math.round(span/(s.length-1)/30.44)||3,1,12)}
     return 1;
   },
   monthActualsSmoothed(mk){
@@ -557,7 +602,7 @@ const ENGINE={
       cycle[b.categoryId]=Math.max(cycle[b.categoryId]||1,ENGINE.billCycleMonths(b));
     }
     const out={};
-    for(const t of state.transactions){
+    for(const t of personalTx()){
       const cid=t.categoryId||'_u';
       const n=cycle[cid]||1;
       if(n<=1){if(monthKey(t.date)===mk)out[cid]=(out[cid]||0)+t.amount;continue}
@@ -699,7 +744,7 @@ const ENGINE={
       for(const tx of state.transactions){
         if(tx.amount>=0||monthKey(tx.date)!==mk)continue;
         const acct=byId(state.accounts,tx.accountId);
-        if(acct&&!acctType(acct).asset)continue;
+        if(acct&&(!acctType(acct).asset||acct.excludeReports))continue;
         const c=byId(state.categories,tx.categoryId);
         if(!c||c.group==='Income'||c.group==='Transfers'||billCats.has(tx.categoryId))continue;
         t+=-tx.amount;
@@ -828,11 +873,29 @@ const ENGINE={
         if(!m)break;
         for(const t of m.txs){used.add(t.id);b.consumedTx.push(t.id)}
         if(b.consumedTx.length>50)b.consumedTx=b.consumedTx.slice(-50);
-        b.nextDue=advanceBill(b.nextDue,b.freq,b.everyN);
+        ENGINE.billAdvance(b);
+        if(b.scheduleDone)break;
         advanced++;
+      }
+      if(b.freq==='schedule')continue; // fixed dates: never re-anchor
+      // anchor to the last real payment: next due = last paid + one cycle.
+      // Catches a stale due date (bill paid early, or the register set up
+      // after the fact) that the due-window match above cannot reach.
+      const last=ENGINE.billLastPaid(b);
+      if(last){
+        const nd=advanceBill(last.date,b.freq,b.everyN);
+        if(nd>b.nextDue){b.nextDue=nd;advanced++}
       }
     }
     return advanced;
+  },
+  /* most recent payment event that looks like this bill: a manual link, or a
+     keyword match within 30% of the registered amount (a keyword like
+     "GOVERNMENT OF WESTERN" can catch unrelated charges - the amount guard
+     keeps those from moving the due date) */
+  billLastPaid(b){
+    if(!(b.matchKeyword||'').trim()&&!state.transactions.some(t=>t.billId===b.id))return null;
+    return ENGINE.billPaymentEvents(b).find(e=>e.manual||Math.abs(e.total-b.amount)<=Math.round(b.amount*0.3))||null;
   },
   debtBalance(d){
     if(d.linkedAccountId){
@@ -1246,6 +1309,59 @@ new ResizeObserver(()=>rerenderCharts()).observe(document.body);
 
 /* ---- shared small components ---- */
 function emptyBox(icon,msg,btn){return`<div class="empty"><div class="big-i">${icon}</div><p>${msg}</p>${btn||''}</div>`}
+/* ---- printable bills register ----
+   Self-contained light-theme page: summary strip, register grouped the way the
+   Bills view is currently grouped, category totals, next 30 days. Opens in a
+   new tab so the browser's Print / Save as PDF does the rest. */
+function billsReportHtml(){
+  const s=ENGINE.billsSummary();
+  const act=state.bills.filter(b=>b.active!==false);
+  const incWk=Math.round(ENGINE.incomeMonthly()*12/52);
+  const ps=incWk?ENGINE.paySplit():null;
+  const wk=v=>Math.round(v*12/52);
+  const freqName=b=>{const f=CONFIG.billFreqs.find(x=>x.id===b.freq);return (f?f.n:b.freq)+(b.freq==='customN'?' ('+(b.everyN||1)+')':'')};
+  const gKey=b=>{const c=byId(state.categories,b.categoryId);switch(ui.billGroup){case 'category':return c?c.name:'Uncategorised';case 'frequency':return freqName(b);case 'method':return b.method||'No method';case 'account':return b.accountId?acctName(b.accountId):'No account';case 'transfer':return b.inTransfer===false?'Not in weekly transfer':'In weekly transfer';case 'none':return '';default:return c?c.group:'Uncategorised'}};
+  const groups=new Map();for(const b of act.slice().sort((a,b)=>ENGINE.billWeekly(b)-ENGINE.billWeekly(a))){const k=gKey(b);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(b)}
+  const gsorted=[...groups.entries()].sort((a,b)=>sum(b[1].map(ENGINE.billWeekly))-sum(a[1].map(ENGINE.billWeekly)));
+  const byCat={};for(const b of act){const k=b.categoryId?catShort(b.categoryId):'Uncategorised';byCat[k]=(byCat[k]||0)+ENGINE.billAnnual(b)}
+  const cats=Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
+  const upcoming=ENGINE.upcomingBills(30);
+  const m=(v)=>fmt(Math.round(v));
+  const tile=(l,v,sub)=>`<div class="tile"><div class="tl">${l}</div><div class="tv">${v}</div>${sub?`<div class="ts">${sub}</div>`:''}</div>`;
+  let body=`<h1>Bills Register</h1><div class="sub">Prepared ${fmtD(todayISO())} &middot; ${act.length} active bill${act.length===1?'':'s'}${s.excluded?` &middot; ${s.excluded} paid outside the transfer`:''}</div>
+  <div class="tiles">
+    ${tile('Weekly transfer',m(s.final),s.buffer||state.settings.billsRound?`base ${m(s.weekly)}${s.buffer?` + ${state.settings.billsBuffer}% buffer`:''}${state.settings.billsRound?` &middot; rounded to $${state.settings.billsRound}s`:''}`:'')}
+    ${tile('Fortnightly',m(s.fortnightly))}${tile('Monthly',m(s.monthly))}${tile('Annual bills',fmt0(s.annual))}
+    ${incWk?tile('Income per week',fmt(incWk),`leaves ${fmtS(incWk-Math.round(s.final))} after the transfer`):''}
+  </div>
+  <h2>Register${ui.billGroup!=='none'?` <span class="dim">grouped by ${({catgroup:'category group',category:'category',frequency:'frequency',method:'payment method',account:'account',transfer:'transfer'})[ui.billGroup]||'category group'}</span>`:''}</h2>
+  <table><thead><tr><th>Bill</th><th>Frequency</th><th>Method</th><th>Last paid</th><th>Next due</th><th class="r">Amount</th><th class="r">Weekly</th><th class="r">Monthly</th><th class="r">Annual</th></tr></thead><tbody>`;
+  for(const [g,bills] of gsorted){
+    const gw=sum(bills.filter(b=>b.inTransfer!==false).map(ENGINE.billWeekly)),ga=sum(bills.map(ENGINE.billAnnual));
+    if(g!=='')body+=`<tr class="g"><td colspan="6">${esc(g)} <span class="dim">${bills.length}</span></td><td class="r">${m(gw)}</td><td class="r">${m(ga/12)}</td><td class="r">${fmt0(ga)}</td></tr>`;
+    for(const b of bills)body+=`<tr><td>${esc(b.name)}${b.inTransfer===false?' <span class="tag">outside transfer</span>':''}</td><td class="mut">${esc(freqName(b))}</td><td class="mut">${esc(b.method||'')}</td><td class="mut">${(lp=>lp?fmtD(lp.date):'-')(ENGINE.billLastPaid(b))}</td><td class="mut">${fmtD(b.nextDue)}</td><td class="r">${fmt(b.amount)}</td><td class="r">${b.inTransfer===false?'-':m(ENGINE.billWeekly(b))}</td><td class="r">${m(ENGINE.billAnnual(b)/12)}</td><td class="r">${fmt0(ENGINE.billAnnual(b))}</td></tr>`;
+  }
+  body+=`<tr class="t"><td colspan="6">Total</td><td class="r">${m(s.weekly)}</td><td class="r">${m(s.annual/12)}</td><td class="r">${fmt0(s.annual)}</td></tr></tbody></table>`;
+  body+=`<div class="two"><div><h2>Annual cost by category</h2><table><tbody>${cats.map(([k,v])=>`<tr><td>${esc(k)}</td><td class="r">${m(v/52)}/wk</td><td class="r">${m(v/12)}/mo</td><td class="r">${fmt0(v)}</td><td class="r mut">${(v/s.annual*100).toFixed(0)}%</td></tr>`).join('')}</tbody></table></div>
+  <div><h2>Next 30 days</h2>${upcoming.length?`<table><tbody>${upcoming.map(u=>`<tr><td>${esc(u.bill.name)}</td><td class="mut">${fmtD(u.bill.nextDue)}</td><td class="r">${fmt(u.bill.amount)}</td><td class="r mut">${u.days<0?`${-u.days}d overdue`:u.days===0?'today':`in ${u.days}d`}</td></tr>`).join('')}<tr class="t"><td colspan="2">Total due</td><td class="r">${fmt(sum(upcoming.map(u=>u.bill.amount)))}</td><td></td></tr></tbody></table>`:'<p class="mut">Nothing due.</p>'}</div></div>`;
+  if(ps){
+    const rows=[['Income',incWk],['Bills transfer',-Math.round(s.final)],['Debt minimums outside the transfer',-wk(ps.mins)],['Living spend',-wk(ps.spend)]];let run=0;
+    body+=`<h2>What's left after the transfer <span class="dim">per week</span></h2><table class="half"><tbody>${rows.map(([nm,v],i)=>{run+=v;return`<tr><td>${nm}</td><td class="r">${i?'- '+fmt(Math.abs(v)):fmt(v)}</td><td class="r mut">${i?'leaves '+fmtS(run):''}</td></tr>`}).join('')}<tr class="t"><td>Spare per week</td><td class="r">${fmtS(run)}</td><td class="r mut">${fmtS(Math.round(run*52/12))}/mo</td></tr></tbody></table>`;
+  }
+  body+=`<div class="foot">Weekly = amount normalised to a week (monthly &times; 12 &divide; 52, quarterly &times; 4 &divide; 52, annual &divide; 52). Monthly = annual &divide; 12. Bills marked outside transfer are paid from another account and excluded from the weekly figure. Generated by FinanceHub ${BUILD}.</div>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Bills Register - ${fmtD(todayISO())}</title><style>
+  body{font:12.5px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;margin:0;padding:28px 34px;background:#fff}
+  h1{font-size:22px;margin:0 0 2px;letter-spacing:.02em}h2{font-size:13px;text-transform:uppercase;letter-spacing:.12em;color:#555;margin:22px 0 8px}.sub{color:#666;font-size:12px;margin-bottom:16px}
+  .tiles{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}.tile{border:1px solid #ddd;border-radius:6px;padding:10px 14px;min-width:130px;flex:1}.tl{font-size:10.5px;text-transform:uppercase;letter-spacing:.1em;color:#777}.tv{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px}.ts{font-size:11px;color:#777;margin-top:2px}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.1em;color:#777;padding:6px 8px;border-bottom:2px solid #ccc}td{padding:5px 8px;border-bottom:1px solid #e8e8e8;vertical-align:top}
+  .r{text-align:right}.mut{color:#777}.dim{color:#999;font-weight:400;text-transform:none;letter-spacing:0}tr.g td{background:#f3f3f3;font-weight:700;font-size:11.5px;text-transform:uppercase;letter-spacing:.06em}tr.t td{font-weight:700;border-top:2px solid #ccc;border-bottom:0}
+  .tag{font-size:9.5px;border:1px solid #c9a227;color:#8a6d00;border-radius:3px;padding:0 4px;margin-left:4px;text-transform:uppercase;letter-spacing:.05em}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:28px}table.half{max-width:520px}.foot{margin-top:26px;font-size:10.5px;color:#888;border-top:1px solid #ddd;padding-top:8px}
+  .bar{position:fixed;top:0;right:0;padding:10px;background:#fff}.bar button{font:inherit;padding:6px 14px;border:1px solid #333;background:#fff;border-radius:4px;cursor:pointer}
+  @media print{.bar{display:none}body{padding:0}tr.g td{-webkit-print-color-adjust:exact;print-color-adjust:exact}.two{page-break-inside:avoid}}
+  @page{margin:14mm}
+  </style></head><body><div class="bar"><button onclick="window.print()">Print / Save as PDF</button></div>${body}</body></html>`;
+}
 function dueBadge(days){
   if(days<0)return`<span class="badge rd">OVERDUE ${-days}d</span>`;
   if(days===0)return`<span class="badge rd">DUE TODAY</span>`;
@@ -1272,6 +1388,7 @@ VIEWS.dashboard=()=>{
     if(monthKey(t.date)!==mk)continue;
     const c=byId(state.categories,t.categoryId);
     const acct=byId(state.accounts,t.accountId);
+    if(acct&&acct.excludeReports)continue;
     if((c&&c.group==='Transfers')||(acct&&!isAsset(acct))){moved+=Math.abs(t.amount);continue}
     if(t.amount>0)inc+=t.amount;else exp+=-t.amount;
   }
@@ -1355,7 +1472,7 @@ VIEWS.accounts=()=>{
           <div class="dim" style="font-size:12.5px;font-family:var(--mono)">${esc(a.institution||'')}${a.group?` <span class="badge" style="font-size:9.5px;margin-left:4px">${esc(a.group)}</span>`:''}</div>
           ${a.purchasePrice?(()=>{const ch=a.balance-a.purchasePrice;const pc=a.purchasePrice?(ch/a.purchasePrice*100):0;return`<div class="num" style="font-size:11.5px;margin-top:2px;color:${ch>=0?'var(--gn)':'var(--rd)'}">paid ${fmt0(a.purchasePrice)} &middot; ${ch>=0?'+':'-'}${fmt0(Math.abs(ch))} (${pc>=0?'+':''}${pc.toFixed(1)}%)</div>`})():''}
         </div>
-        <span class="badge ${t.asset?'gn':'rd'}">${t.n}</span>
+        <span class="badge ${t.asset?'gn':'rd'}">${t.n}</span>${a.excludeReports?' <span class="badge" title="Kept out of Reports, Budget and Pay Split">NOT HOUSEHOLD</span>':''}
       </div>
       <div class="num" style="font-size:24px;font-weight:700;margin:10px 0 2px;${!t.asset&&a.balance!==0?'color:var(--rd)':''}">${fmt(Math.abs(a.balance))}</div>
       <div class="dim" style="font-size:12.5px;font-family:var(--mono)">${a.rate?a.rate+'% p.a.':''}${a.limit?(a.rate?' &middot; ':'')+'limit '+fmt0(a.limit):''}${a.archived?' &middot; ARCHIVED':''}</div>
@@ -1411,6 +1528,7 @@ function accountForm(a={}){
     <label class="f"><span class="fl">Colour tag</span><input type="color" name="color" value="${a.color||'#f97316'}"></label>
     <label class="f" style="align-self:end"><span class="chk"><input type="checkbox" name="noTx" id="acct-notx" ${a.noTx||(a.id===undefined&&false)?'checked':''}> Valuation-only (no transactions)</span></label>
     <label class="f" style="align-self:end"><span class="chk"><input type="checkbox" name="archived" ${a.archived?'checked':''}> Archived</span></label>
+    <label class="f" style="align-self:end"><span class="chk"><input type="checkbox" name="excludeReports" ${a.excludeReports?'checked':''}> Business / not household - keep out of Reports, Budget and Pay Split (still counts in Net Worth)</span></label>
   </div>
   <p class="dim" style="font-size:12px">Valuation-only assets (home, vehicles, equipment) are excluded from every transaction, bill, and income dropdown - they exist purely for Net Worth and equity tracking.</p>`;
 }
@@ -1545,7 +1663,7 @@ VIEWS.bills=()=>{
   const act=state.bills.filter(b=>b.active!==false);
   let h=`<div class="hero" style="margin-bottom:14px">
     <div class="main-fig">
-      <div class="l">Weekly Transfer</div>
+      <div class="l" title="Every bill normalised to a true weekly cost: monthly x 12 / 52, quarterly x 4 / 52, half-yearly x 2 / 52, annual / 52. Transfer this every week and every bill is covered on average; the health check verifies the timing.">Weekly Transfer <span class="dim" style="font-size:10px">&#9432;</span></div>
       <div class="v">${fmt(s.final)}</div>
       ${s.buffer||state.settings.billsRound?`<div class="dim" style="font-family:var(--mono);font-size:12.5px;margin-top:4px">base ${fmt(s.weekly)}${s.buffer?` + ${state.settings.billsBuffer}% buffer ${fmt(s.buffer)}`:''}${state.settings.billsRound?` &middot; rounded up to $${state.settings.billsRound}s`:''}</div>`:''}
     </div>
@@ -1574,8 +1692,9 @@ VIEWS.bills=()=>{
     <span class="sec-label">Bills account:</span>
     <select data-change="bills-account" style="width:190px">${acctOptions(state.settings.billsAccountId)}</select></div>`;
   if(!state.bills.length)return h+emptyBox('\u2261','No bills yet. Add every regular bill - power, insurance, rego, streaming - and FinanceHub will tell you the exact weekly amount to set aside.','<button class="btn" data-action="bill-add">Add your first bill</button>');
-  // health check + upcoming
-  h+='<div class="grid g2" style="margin-bottom:14px">';
+  // health check + category donut stacked on the left, upcoming on the right;
+  // align-items:start stops the shorter cards stretching to the tallest one
+  h+='<div class="grid g2" style="margin-bottom:14px"><div class="grid" style="gap:14px;align-content:start">';
   h+=`<div class="card"><h3>Bills Account Health <span class="r dim" style="font-family:var(--mono);font-size:11px">12 WEEK PROJECTION</span></h3>`;
   if(!state.settings.billsAccountId)h+=`<p class="dim" style="font-size:12.5px;line-height:1.6">Select your bills account above to project its balance: weekly transfer of ${fmt(s.final)} in, each bill out on its due date.</p>`;
   else{
@@ -1585,15 +1704,19 @@ VIEWS.bills=()=>{
     else h+=`<div style="margin-top:10px;font-size:12.5px;color:var(--gn);font-family:var(--mono)">&#10003; No shortfall weeks. Min float needed from a zero start: ${fmt(proj.minFloat)} &middot; opening balance ${fmt(proj.opening)}.</div>`;
   }
   h+='</div>';
-  h+=`<div class="card"><h3>Upcoming <span class="r dim" style="font-family:var(--mono);font-size:11px">NEXT 30 DAYS</span></h3>`;
-  if(!upcoming.length)h+='<p class="dim" style="font-size:12.5px">Nothing due in the next 30 days.</p>';
-  else h+='<table><tbody>'+upcoming.map(u=>`<tr><td>${esc(u.bill.name)}</td><td class="mut">${fmtD(u.bill.nextDue)}</td><td class="r">${fmt(u.bill.amount)}</td><td class="r">${dueBadge(u.days)}</td><td class="r"><button class="btn sm" data-action="bill-paid" data-id="${u.bill.id}">Paid &#10003;</button></td></tr>`).join('')+'</tbody></table>';
-  h+='</div></div>';
-  // charts row
+  // annual cost by category (left column, under health)
   const byCat={};for(const b of act){const k=b.categoryId?catShort(b.categoryId):'Uncategorised';byCat[k]=(byCat[k]||0)+ENGINE.billAnnual(b)}
   const items=Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([n,v],i)=>({name:n,value:Math.round(v),color:CONFIG.series[i%CONFIG.series.length]}));
-  h+=`<div class="grid g2" style="margin-bottom:14px"><div class="card"><h3>Annual Bill Cost by Category</h3>${chart('bills-donut',el=>CH.donut(el,{items,centerLabel:'PER YEAR',centerValue:fmt0(s.annual)}))}</div>
-  <div class="card"><h3>Weekly Set-aside Engine</h3><p class="dim" style="font-size:12px;line-height:1.7">Every bill is normalised to a true weekly cost by exact annualisation:<br><span class="num" style="color:var(--tx2)">monthly &times; 12 &divide; 52 &middot; quarterly &times; 4 &divide; 52 &middot; half-yearly &times; 2 &divide; 52 &middot; annual &divide; 52</span><br><br>Transfer <b class="acc num">${fmt(s.final)}</b> into your bills account every week and every bill is covered on average - the health check above verifies the timing.</p></div></div>`;
+  const per=ui.billCatPeriod||'annual';
+  const perCfg={weekly:['PER WEEK',52,'Weekly'],monthly:['PER MONTH',12,'Monthly'],quarterly:['PER QUARTER',4,'Quarterly'],annual:['PER YEAR',1,'Annual']};
+  const [perLabel,perDiv,perTitle]=perCfg[per]||perCfg.annual;
+  const pitems=items.map(x=>({...x,value:Math.round(x.value/perDiv)}));
+  h+=`<div class="card" style="flex:1"><h3>${perTitle} Bill Cost by Category <span class="r pill-row" style="gap:4px">${Object.entries(perCfg).map(([k,v])=>`<button class="btn sm ${per===k?'primary':''}" data-action="bill-cat-period" data-p="${k}" style="padding:2px 8px;font-size:10px">${v[2]}</button>`).join('')}</span></h3>${chart('bills-donut',el=>CH.donut(el,{items:pitems,centerLabel:perLabel,centerValue:fmt0(s.annual/perDiv)}))}</div>`;
+  h+='</div>';
+  h+=`<div class="card" style="display:flex;flex-direction:column;min-height:0"><h3>Upcoming <span class="r dim" style="font-family:var(--mono);font-size:11px">NEXT 30 DAYS</span></h3>`;
+  if(!upcoming.length)h+='<p class="dim" style="font-size:12.5px">Nothing due in the next 30 days.</p>';
+  else h+='<div style="flex:1;overflow:auto;min-height:0"><table class="compact fit"><tbody>'+upcoming.map(u=>`<tr><td>${esc(u.bill.name)}</td><td class="mut">${fmtD(u.bill.nextDue)}</td><td class="r">${fmt(u.bill.amount)}</td><td class="r">${dueBadge(u.days)}</td><td class="r"><button class="btn sm" data-action="bill-paid" data-id="${u.bill.id}">Paid &#10003;</button></td></tr>`).join('')+'</tbody></table></div>';
+  h+='</div></div>';
   {
     const incWk=Math.round(ENGINE.incomeMonthly()*12/52);
     if(incWk){
@@ -1618,7 +1741,7 @@ VIEWS.bills=()=>{
   }
   // ---- register: filter / group / sort ----
   const bf=ui.billFilter;
-  const freqName=b=>{const f=CONFIG.billFreqs.find(x=>x.id===b.freq);return (f?f.n:b.freq)+(b.freq==='customN'?' ('+(b.everyN||1)+')':'')};
+  const freqName=b=>{const f=CONFIG.billFreqs.find(x=>x.id===b.freq);return (f?f.n:b.freq)+(b.freq==='customN'?' ('+(b.everyN||1)+')':'')+(b.freq==='schedule'?' ('+(b.schedule||[]).length+')':'')};
   const gKey=b=>{
     const c=byId(state.categories,b.categoryId);
     switch(ui.billGroup){
@@ -1654,13 +1777,17 @@ VIEWS.bills=()=>{
     <select data-change="bill-filter" data-k="status" style="width:110px"><option value="active" ${bf.status==='active'?'selected':''}>Active</option><option value="paused" ${bf.status==='paused'?'selected':''}>Paused</option><option value="cancelled" ${bf.status==='cancelled'?'selected':''}>Cancelled</option><option value="all" ${bf.status==='all'?'selected':''}>All</option></select>
     <input data-input="bill-filter" data-k="q" value="${esc(bf.q)}" placeholder="Search bills..." style="width:160px">
     ${(bf.q||bf.freq||bf.transfer||bf.status!=='active')?'<button class="btn sm" data-action="bill-clear-filter">Clear</button>':''}
+    ${ui.billGroup!=='none'?`<button class="btn sm" data-action="bill-group-all" data-mode="${Object.keys(ui.billCollapsed||{}).length?'expand':'collapse'}">${Object.keys(ui.billCollapsed||{}).length?'Expand all':'Collapse all'}</button>`:''}
+    <span class="spacer"></span>
+    <button class="btn sm" data-action="bill-report" title="Print-ready bills register: opens in a new tab, use Print / Save as PDF">&#9113; Report</button>
+    <button class="btn sm" data-action="bill-csv">CSV</button>
   </div>`;
   const groups=new Map();
   for(const b of list){const k=gKey(b);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(b)}
   const shownWk=sum(list.filter(b=>b.active!==false&&b.inTransfer!==false).map(b=>ENGINE.billWeekly(b)));
   const shownAn=sum(list.filter(b=>b.active!==false).map(b=>ENGINE.billAnnual(b)));
-  h+='<div class="card pad0"><table><thead><tr><th>Bill</th><th>Frequency</th><th>Method</th><th>Next due</th><th class="r">Amount</th><th class="r">Weekly</th><th class="r">Annual</th><th></th></tr></thead><tbody>';
-  if(!list.length)h+=`<tr><td colspan="8" class="dim" style="padding:18px">No bills match these filters.</td></tr>`;
+  h+=`<div class="card pad0"><table><thead><tr><th>Bill</th><th>Frequency</th><th>Method</th><th>Last paid</th><th>Next due</th><th class="r">Amount</th><th class="r" title="Amount normalised to a week: monthly x 12 / 52, quarterly x 4 / 52, annual / 52">Weekly</th><th class="r" title="Annual / 12">Monthly</th><th class="r">Annual</th><th></th></tr></thead><tbody>`;
+  if(!list.length)h+=`<tr><td colspan="10" class="dim" style="padding:18px">No bills match these filters.</td></tr>`;
   for(const [g,bills] of [...groups.entries()].sort((a,b)=>{
       if(ui.billGroup==='none')return 0;
       const wa=sum(a[1].map(x=>ENGINE.billWeekly(x))),wb=sum(b[1].map(x=>ENGINE.billWeekly(x)));
@@ -1668,26 +1795,33 @@ VIEWS.bills=()=>{
     })){
     const gw=sum(bills.filter(b=>b.active!==false&&b.inTransfer!==false).map(b=>ENGINE.billWeekly(b)));
     const ga=sum(bills.filter(b=>b.active!==false).map(b=>ENGINE.billAnnual(b)));
-    if(g!=='')h+=`<tr><td colspan="4" style="background:#141414"><span class="sec-label">${esc(g)}</span> <span class="dim" style="font-size:11px">${bills.length} bill${bills.length>1?'s':''}</span></td>
-      <td style="background:#141414"></td><td class="r acc num" style="background:#141414;font-weight:700">${fmt(Math.round(gw))}</td><td class="r num" style="background:#141414;font-weight:700">${fmt0(ga)}</td><td style="background:#141414"></td></tr>`;
+    const collapsed=!!(ui.billCollapsed&&ui.billCollapsed[g]);
+    // header band: name + count only (numbers live on the lines and the subtotal);
+    // collapsed groups show the totals on the band so nothing is lost
+    if(g!=='')h+=`<tr class="grp" data-action="bill-group-toggle" data-g="${esc(g)}"><td colspan="${collapsed?6:10}"><span class="car">${collapsed?'&#9656;':'&#9662;'}</span><span class="sec-label" style="color:var(--tx)">${esc(g)}</span><span class="cnt">${bills.length} BILL${bills.length>1?'S':''}</span></td>${collapsed?`<td class="r acc num" style="font-weight:700">${fmt(Math.round(gw))}</td><td class="r num" style="font-weight:700">${fmt(Math.round(ga/12))}</td><td class="r num" style="font-weight:700">${fmt0(ga)}</td><td></td>`:''}</tr>`;
+    if(collapsed)continue;
+    let firstRow=true;
     for(const b of bills.sort(cmp)){
       const f=CONFIG.billFreqs.find(x=>x.id===b.freq);
-      h+=`<tr style="${b.active===false?'opacity:.45':''}">
+      h+=`<tr class="ln ${firstRow?'first':''}" style="${b.active===false?'opacity:.45':''}">`;firstRow=false;h+=`
         <td>${esc(b.name)}${b.cancelled?` <span class="badge" title="Cancelled${b.cancelledDate?' '+fmtD(b.cancelledDate):''} - kept for history">CANCELLED</span>`:b.active===false?' <span class="badge">PAUSED</span>':''}${b.inTransfer===false?' <span class="badge am" title="Not funded by the weekly transfer - paid from another account">NOT IN TRANSFER</span>':''}${b.debtId?` <span class="badge rd" title="Funds the repayment of '${esc((byId(state.debts,b.debtId)||{}).name||'')}' - Pay Split counts it once">&#9660; ${esc((byId(state.debts,b.debtId)||{}).name||'debt')}</span>`:''}${b.autoFrom?' <span class="badge" title="Managed by the debt - edit the amount or frequency on the debt itself">AUTO</span>':''}${b.notes?` <span class="dim" title="${esc(b.notes)}">&#9776;</span>`:''}
-          ${(dr=>dr?`<div class="num" style="font-size:11px;margin-top:2px;color:${Math.abs(dr.pc)>10?'var(--am)':'var(--tx3)'}">last ${fmtD(dr.last.date)} &middot; actuals avg ${fmt(dr.avg)}${Math.abs(dr.pc)>10?` (${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered - update amount to fix the weekly transfer)`:''}</div>`:'')(ENGINE.billDrift(b))}</td>
-        <td class="mut">${f?f.n:''}${b.freq==='customN'?' ('+(b.everyN||1)+')':''}</td>
+          ${(dr=>dr?`<div class="num" style="font-size:11px;margin-top:2px;color:${Math.abs(dr.pc)>10?'var(--am)':'var(--tx3)'}">actuals avg ${fmt(dr.avg)}${Math.abs(dr.pc)>10?` (${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered - update amount to fix the weekly transfer)`:''}</div>`:'')(ENGINE.billDrift(b))}</td>
+        <td class="mut">${f?f.n:''}${b.freq==='customN'?' ('+(b.everyN||1)+')':''}${b.freq==='schedule'?(r=>` <span class="dim">(${r.of-r.count}/${r.of} paid)</span>`)(ENGINE.scheduleRemaining(b)):''}</td>
         <td class="mut">${esc(b.method||'')}</td>
-        <td class="mut">${fmtD(b.nextDue)}</td>
+        ${(lp=>`<td class="mut num" title="${lp?'From transactions: '+fmt(lp.total)+' on '+fmtD(lp.date):'No matching transaction yet - set a match keyword'}">${lp?fmtD(lp.date):'<span class="dim">\u2014</span>'}</td>`)(ENGINE.billLastPaid(b))}
+        <td class="mut">${b.scheduleDone?'<span class="badge gn">COMPLETE</span>':fmtD(b.nextDue)}${b.autoAdvance!==false&&(b.matchKeyword||'').trim()?'':' <span class="dim" title="No keyword or auto-advance off - due date only moves when you press Paid">&#8226;</span>'}${b.freq==='schedule'&&!b.scheduleDone?(r=>`<div class="dim num" style="font-size:11px">${r.count} left &middot; ${fmt(r.total)}</div>`)(ENGINE.scheduleRemaining(b)):''}</td>
         <td class="r">${fmt(b.amount)}</td>
         <td class="r ${b.inTransfer===false?'mut':'acc'}">${b.inTransfer===false?'-':fmt(Math.round(ENGINE.billWeekly(b)))}</td>
+        <td class="r">${fmt(Math.round(ENGINE.billAnnual(b)/12))}</td>
         <td class="r">${fmt0(ENGINE.billAnnual(b))}</td>
         <td><span class="row-act"><button class="iconbtn" data-action="bill-edit" data-id="${b.id}">&#9998;</button>${b.cancelled?`<button class="btn sm" data-action="bill-reinstate" data-id="${b.id}">Reinstate</button>`:`<button class="iconbtn" data-action="bill-cancel" data-id="${b.id}" title="Cancelled - keep for history">&#8856;</button>`}<button class="iconbtn del" data-action="bill-del" data-id="${b.id}">&#10005;</button></span></td>
       </tr>`;
     }
+    if(g!==''&&bills.length>1)h+=`<tr class="sub"><td colspan="6">Subtotal &middot; ${esc(g)}</td><td class="r num">${fmt(Math.round(gw))}</td><td class="r num">${fmt(Math.round(ga/12))}</td><td class="r num">${fmt0(ga)}</td><td></td></tr>`;
   }
   const filtered=list.length!==state.bills.length;
-  h+=`<tr class="tot"><td colspan="4">${filtered?'TOTAL (SHOWN)':'TOTAL (ACTIVE)'}</td><td></td><td class="r acc">${fmt(Math.round(shownWk))}</td><td class="r">${fmt0(shownAn)}</td><td></td></tr>`;
-  if(filtered)h+=`<tr><td colspan="4" class="dim" style="font-size:11.5px">All active bills: ${fmt(Math.round(s.weekly))}/wk &middot; ${fmt0(s.annual)}/yr</td><td></td><td class="r dim num" style="font-size:11.5px">${fmt(Math.round(s.weekly))}</td><td class="r dim num" style="font-size:11.5px">${fmt0(s.annual)}</td><td></td></tr>`;
+  h+=`<tr class="tot"><td colspan="5">${filtered?'TOTAL (SHOWN)':'TOTAL (ACTIVE)'}</td><td></td><td class="r acc">${fmt(Math.round(shownWk))}</td><td class="r">${fmt(Math.round(shownAn/12))}</td><td class="r">${fmt0(shownAn)}</td><td></td></tr>`;
+  if(filtered)h+=`<tr><td colspan="5" class="dim" style="font-size:11.5px">All active bills: ${fmt(Math.round(s.weekly))}/wk &middot; ${fmt0(s.annual)}/yr</td><td></td><td class="r dim num" style="font-size:11.5px">${fmt(Math.round(s.weekly))}</td><td class="r dim num" style="font-size:11.5px">${fmt(Math.round(s.annual/12))}</td><td class="r dim num" style="font-size:11.5px">${fmt0(s.annual)}</td><td></td></tr>`;
   h+='</tbody></table></div>';
   return h;
 };
@@ -1710,8 +1844,12 @@ function billForm(b={}){
     <label class="f"><span class="fl">Frequency</span><select name="freq" data-change="bill-freq-toggle">${CONFIG.billFreqs.map(f=>`<option value="${f.id}" ${b.freq===f.id?'selected':''}>${f.n}</option>`).join('')}</select></label>
     <label class="f" id="everyN-wrap" style="${b.freq==='customN'?'':'display:none'}"><span class="fl">Every N weeks</span><input name="everyN" type="number" min="1" value="${b.everyN||4}"></label>
   </div>
+  <div id="schedule-wrap" style="${b.freq==='schedule'?'':'display:none'};margin-bottom:8px">
+    <label class="f"><span class="fl">Instalments - one per line: date, amount (add "paid" to tick one off)</span><textarea name="scheduleText" rows="5" style="font-family:var(--mono);font-size:12.5px" placeholder="15/09/2026 49.26 paid&#10;17/11/2026 619.66&#10;19/01/2027 619.66&#10;23/03/2027 619.66">${esc((b.schedule||[]).map(i=>fmtD(i.date)+' '+(i.amount/100).toFixed(2)+(i.paid?' paid':'')).join('\n'))}</textarea></label>
+    <p class="dim" style="font-size:11.5px;line-height:1.6;margin-top:-4px">Amount and Next due below are filled from the next unpaid instalment. Weekly set-aside = total of the schedule &divide; 52, so a notice covering one year is spread evenly. Matched payments tick instalments off in order; when the last one is paid the bill shows complete until you paste next year's notice.</p>
+  </div>
   <div class="frow3">
-    <label class="f"><span class="fl">Next due date</span><input type="date" name="nextDue" value="${b.nextDue||todayISO()}"></label>
+    <label class="f"><span class="fl">Next due date</span><input type="date" name="nextDue" value="${b.nextDue||todayISO()}">${(lp=>lp?`<span class="dim num" style="font-size:11px;margin-top:3px">last paid ${fmtD(lp.date)} (${fmt(lp.total)}) &middot; auto-advance sets next due to last paid + 1 cycle</span>`:'')(b.id?ENGINE.billLastPaid(b):null)}</label>
     <label class="f"><span class="fl">Paid from account</span><select name="accountId">${acctOptions(b.accountId)}</select></label>
     <label class="f"><span class="fl">Payment method</span><select name="method">${['Direct debit','BPAY','Manual'].map(m=>`<option ${b.method===m?'selected':''}>${m}</option>`).join('')}</select></label>
   </div>
@@ -2240,7 +2378,8 @@ VIEWS.networth=()=>{
 VIEWS.reports=()=>{
   const r=ui.reportRange;
   const inRange=t=>t.date>=r.from&&t.date<=r.to;
-  const txs=state.transactions.filter(inRange);
+  const ptx=personalTx();
+  const txs=ptx.filter(inRange);
   let h=`<div class="toolbar"><span class="sec-label">Date range:</span>
     <input type="date" data-change="report-range" data-k="from" value="${r.from}" style="width:140px">
     <input type="date" data-change="report-range" data-k="to" value="${r.to}" style="width:140px">
@@ -2251,7 +2390,7 @@ VIEWS.reports=()=>{
   const byCat={},byCatPrev={};
   const spanDays=Math.max(1,daysBetween(r.from,r.to));
   const prevFrom=addDays(r.from,-spanDays-1),prevTo=addDays(r.from,-1);
-  for(const t of state.transactions){
+  for(const t of ptx){
     if(t.amount>=0)continue;
     const c=byId(state.categories,t.categoryId);
     if(c&&(c.group==='Transfers'))continue;
@@ -2269,8 +2408,10 @@ VIEWS.reports=()=>{
     </tbody></table></div>`;
   // income vs expenses trailing 12 months
   const months=[];for(let i=11;i>=0;i--)months.push(monthKey(addMonths(todayISO(),-i)));
-  const inc=months.map(mk=>sum(state.transactions.filter(t=>monthKey(t.date)===mk&&t.amount>0).map(t=>t.amount)));
-  const exp=months.map(mk=>sum(state.transactions.filter(t=>monthKey(t.date)===mk&&t.amount<0).map(t=>-t.amount)));
+  // income vs expenses: transfers between your own accounts are neither
+  const notTransfer=t=>{const c=byId(state.categories,t.categoryId);return !(c&&c.group==='Transfers')};
+  const inc=months.map(mk=>sum(ptx.filter(t=>monthKey(t.date)===mk&&t.amount>0&&notTransfer(t)).map(t=>t.amount)));
+  const exp=months.map(mk=>sum(ptx.filter(t=>monthKey(t.date)===mk&&t.amount<0&&notTransfer(t)).map(t=>-t.amount)));
   const rate=months.map((mk,i)=>inc[i]>0?(inc[i]-exp[i])/inc[i]*100:null);
   h+=`<div class="card"><h3>Income vs Expenses <span class="r dim" style="font-family:var(--mono);font-size:11px">TRAILING 12 MONTHS</span></h3>
     ${chart('rep-ie',el=>CH.bars(el,{groups:months.map((mk,i)=>({label:fmtMY(mk+'-01').slice(0,3),values:[inc[i],exp[i]]})),series:[{name:'Income',color:CONFIG.colors.gn},{name:'Expenses',color:CONFIG.colors.rd}],height:250,line:{name:'Savings rate',color:CONFIG.colors.or,data:rate},legendId:'rep-ie'}))}</div></div>`;
@@ -2280,7 +2421,7 @@ VIEWS.reports=()=>{
   // category trend
   const trendCat=ui.reportCat||state.categories[0]?.id;
   const tmonths=[];for(let i=11;i>=0;i--)tmonths.push(monthKey(addMonths(todayISO(),-i)));
-  const tdata=tmonths.map(mk=>Math.abs(sum(state.transactions.filter(t=>monthKey(t.date)===mk&&t.categoryId===trendCat).map(t=>t.amount))));
+  const tdata=tmonths.map(mk=>Math.abs(sum(ptx.filter(t=>monthKey(t.date)===mk&&t.categoryId===trendCat).map(t=>t.amount))));
   h+=`<div class="card"><h3>Category Trend <span class="r"><select data-change="report-cat" style="width:210px">${catOptions(trendCat)}</select></span></h3>
     ${chart('rep-trend',el=>CH.line(el,{labels:tmonths.map(mk=>fmtMY(mk+'-01').slice(0,3)),series:[{name:catShort(trendCat),color:CONFIG.colors.or,data:tdata}],fillFirst:true,height:200}))}</div>`;
   return h;
@@ -2384,12 +2525,12 @@ const ACTIONS={
     if(ui.editing){
       const a=byId(state.accounts,ui.editing);
       const balChanged=a.balance!==bal;
-      Object.assign(a,{name:v.name.trim(),institution:v.institution.trim(),group:(v.group||'').trim(),type:v.type,balance:bal,rate:pct(v.rate)||0,limit:cents(v.limit),color:v.color,archived:!!v.archived,noTx:!!v.noTx,purchasePrice:cents(v.purchasePrice),purchaseDate:v.purchaseDate||''});
+      Object.assign(a,{name:v.name.trim(),institution:v.institution.trim(),group:(v.group||'').trim(),type:v.type,balance:bal,rate:pct(v.rate)||0,limit:cents(v.limit),color:v.color,archived:!!v.archived,noTx:!!v.noTx,excludeReports:!!v.excludeReports,purchasePrice:cents(v.purchasePrice),purchaseDate:v.purchaseDate||''});
       if(balChanged)pushBalanceHistory(a);
       if(a.archived&&!a.closedDate)a.closedDate=todayISO();
       if(!a.archived)delete a.closedDate;
     }else{
-      state.accounts.push({id:uid(),name:v.name.trim(),institution:v.institution.trim(),group:(v.group||'').trim(),type:v.type,balance:bal,rate:pct(v.rate)||0,limit:cents(v.limit),color:v.color,archived:!!v.archived,noTx:!!v.noTx,purchasePrice:cents(v.purchasePrice),purchaseDate:v.purchaseDate||'',history:[{date:todayISO(),balance:bal}]});
+      state.accounts.push({id:uid(),name:v.name.trim(),institution:v.institution.trim(),group:(v.group||'').trim(),type:v.type,balance:bal,rate:pct(v.rate)||0,limit:cents(v.limit),color:v.color,archived:!!v.archived,noTx:!!v.noTx,excludeReports:!!v.excludeReports,purchasePrice:cents(v.purchasePrice),purchaseDate:v.purchaseDate||'',history:[{date:todayISO(),balance:bal}]});
     }
     reconcileDebtBalances();
     MODAL.close();save();render();toast('Account saved');
@@ -2567,9 +2708,46 @@ const ACTIONS={
     const v=modalFormValues();
     if(!v.name.trim())return toast('Bill name is required');
     const rec={name:v.name.trim(),categoryId:v.categoryId,amount:cents(v.amount),freq:v.freq,everyN:Math.max(1,parseInt(v.everyN)||1),nextDue:v.nextDue,accountId:v.accountId,method:v.method,notes:v.notes.trim(),matchKeyword:(v.matchKeyword||'').trim(),autoAdvance:!!v.autoAdvance,inTransfer:!!v.inTransfer,debtId:v.debtId||'',active:!!v.active};
-    if(ui.editing){const bb=byId(state.bills,ui.editing);Object.assign(bb,rec);if(rec.active&&bb.cancelled){delete bb.cancelled;delete bb.cancelledDate}}
-    else state.bills.push({id:uid(),...rec});
+    if(rec.freq==='schedule'){
+      const prev=ui.editing?((byId(state.bills,ui.editing)||{}).schedule||[]):[];
+      const lines=String(v.scheduleText||'').split('\n').map(l=>l.trim()).filter(Boolean);
+      const sched=[];
+      for(const l of lines){
+        const m=l.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})\s+\$?([\d,]+(?:\.\d{1,2})?)\s*(paid|x|\u2713)?$/i)||l.match(/^(\d{4})-(\d{2})-(\d{2})\s+\$?([\d,]+(?:\.\d{1,2})?)\s*(paid|x|\u2713)?$/i);
+        if(!m)return toast('Could not read instalment line: "'+l+'" - use dd/mm/yyyy amount');
+        const date=m[1].length===4?`${m[1]}-${m[2]}-${m[3]}`:`${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+        const amount=cents(m[4].replace(/,/g,''));
+        const was=prev.find(p=>p.date===date&&p.amount===amount);
+        sched.push({date,amount,paid:!!m[5]||!!(was&&was.paid)});
+      }
+      if(!sched.length)return toast('Add at least one instalment line');
+      rec.schedule=sched;
+    }
+    if(ui.editing){const bb=byId(state.bills,ui.editing);Object.assign(bb,rec);if(rec.freq!=='schedule')delete bb.schedule;if(rec.active&&bb.cancelled){delete bb.cancelled;delete bb.cancelledDate}if(bb.freq==='schedule')ENGINE.scheduleSync(bb)}
+    else{const nb={id:uid(),...rec};if(nb.freq==='schedule')ENGINE.scheduleSync(nb);state.bills.push(nb)}
     MODAL.close();save();render();toast('Bill saved - weekly transfer updated');
+  },
+  'bill-cat-period':el=>{ui.billCatPeriod=el.dataset.p;render()},
+  'bill-group-toggle':el=>{ui.billCollapsed=ui.billCollapsed||{};const g=el.dataset.g;if(ui.billCollapsed[g])delete ui.billCollapsed[g];else ui.billCollapsed[g]=true;render()},
+  'bill-group-all':el=>{
+    if(el.dataset.mode==='expand'){ui.billCollapsed={};render();return}
+    const gset={};for(const b of state.bills){const c=byId(state.categories,b.categoryId);let k;switch(ui.billGroup){case 'category':k=c?c.name:'Uncategorised';break;case 'frequency':k=(CONFIG.billFreqs.find(x=>x.id===b.freq)||{}).n||b.freq;break;case 'method':k=b.method||'No method';break;case 'account':k=b.accountId?acctName(b.accountId):'No account';break;case 'transfer':k=b.inTransfer===false?'Not in weekly transfer':'In weekly transfer';break;default:k=c?c.group:'Uncategorised'}gset[k]=true}
+    ui.billCollapsed=gset;render();
+  },
+  'bill-csv':()=>{
+    const rows=[['Bill','Category','Group','Frequency','Method','Account','Next due','Amount','Weekly','Monthly','Annual','In transfer','Status']];
+    for(const b of state.bills.slice().sort((a,b)=>ENGINE.billWeekly(b)-ENGINE.billWeekly(a))){
+      const c=byId(state.categories,b.categoryId);const f=CONFIG.billFreqs.find(x=>x.id===b.freq);
+      rows.push([b.name,c?c.name:'',c?c.group:'',(f?f.n:b.freq)+(b.freq==='customN'?' ('+(b.everyN||1)+')':''),b.method||'',b.accountId?acctName(b.accountId):'',b.nextDue||'',(b.amount/100).toFixed(2),(ENGINE.billWeekly(b)/100).toFixed(2),(ENGINE.billAnnual(b)/1200).toFixed(2),(ENGINE.billAnnual(b)/100).toFixed(2),b.inTransfer===false?'no':'yes',b.cancelled?'cancelled':b.active===false?'paused':'active']);
+    }
+    const csv=rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n');
+    saveViaFS(`financehub-bills-${todayISO()}.csv`,csv,'CSV file','.csv','text/csv');
+  },
+  'bill-report':()=>{
+    const html=billsReportHtml();
+    const w=window.open('','_blank');
+    if(w&&w.document){w.document.open();w.document.write(html);w.document.close()}
+    else saveViaFS(`bills-register-${todayISO()}.html`,html,'HTML report','.html','text/html');
   },
   'bill-cancel':async el=>{
     const b=byId(state.bills,el.dataset.id);
@@ -2600,8 +2778,8 @@ const ACTIONS={
   'bill-paid-save':()=>{
     const b=byId(state.bills,ui.editing);const v=modalFormValues();
     if(v.post)state.transactions.push({id:uid(),date:todayISO(),accountId:b.accountId,payee:b.name,categoryId:b.categoryId,amount:-b.amount,notes:'(bill payment)',tags:['bill'],hash:txHash(todayISO(),-b.amount,b.name)});
-    b.nextDue=advanceBill(b.nextDue,b.freq,b.everyN);
-    MODAL.close();save();render();toast(b.name+' marked paid - next due '+fmtD(b.nextDue));
+    ENGINE.billAdvance(b);
+    MODAL.close();save();render();toast(b.name+(b.scheduleDone?' - all instalments paid':' marked paid - next due '+fmtD(b.nextDue)));
   },
 
   /* ---- budget ---- */
@@ -2932,10 +3110,10 @@ const CHANGES={
   'bills-buffer':el=>{state.settings.billsBuffer=clamp(parseFloat(el.value)||0,0,50);save();render()},
   'bills-round':el=>{state.settings.billsRound=+el.value;save();render()},
   'bills-account':el=>{state.settings.billsAccountId=el.value;save();render()},
-  'bill-freq-toggle':el=>{const w=$('#everyN-wrap');if(w)w.style.display=el.value==='customN'?'':'none'},
+  'bill-freq-toggle':el=>{const w=$('#everyN-wrap');if(w)w.style.display=el.value==='customN'?'':'none';const s=$('#schedule-wrap');if(s)s.style.display=el.value==='schedule'?'':'none'},
   'budget-mode':el=>{ui.budgetMode=el.value;render()},
   'budget-smooth':el=>{ui.budgetSmooth=el.checked;render()},
-  'bill-group':el=>{ui.billGroup=el.value;render()},
+  'bill-group':el=>{ui.billGroup=el.value;ui.billCollapsed={};render()},
   'bill-sort':el=>{ui.billSort=el.value;render()},
   'bill-filter':el=>{ui.billFilter[el.dataset.k]=el.value;render()},
   'budget-set':el=>{
