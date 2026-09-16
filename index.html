@@ -114,7 +114,7 @@ tr.grp td:first-child{border-left:3px solid var(--or)}
 tr.grp .cnt{font-family:var(--mono);font-size:10.5px;color:var(--tx3);margin-left:6px}
 tr.grp .car{display:inline-block;width:14px;color:var(--tx3);font-size:10px}
 tr.ln td{vertical-align:top;white-space:nowrap}tr.ln td:first-child{padding-left:22px;border-left:3px solid transparent;white-space:normal}
-tr.ln .meta{font-family:var(--mono);font-size:11px;margin-top:3px;line-height:1.4}
+tr.ln .meta{font-family:var(--mono);font-size:11px;margin-top:3px;line-height:1.4}tr.ln .meta .badge{vertical-align:middle}
 tr.ln.first td{padding-top:9px}
 tr.sub td{background:#121212;font-family:var(--mono);font-size:11.5px;color:var(--tx2);padding:5px 10px 7px;border-bottom:0}
 tr.sub td:first-child{border-left:3px solid transparent;padding-left:22px;font-family:var(--head);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--tx3)}
@@ -245,6 +245,7 @@ svg .fade{animation:fin .7s}
     <div id="topbar">
       <button id="burger" data-action="toggle-nav" aria-label="Toggle navigation">&#9776;</button>
       <h2 id="view-title">Dashboard</h2>
+      <button class="btn sm" id="page-report-btn" data-action="page-report" title="Print-ready report of this page - opens in a new tab, Print / Save as PDF">&#9113; Report</button>
       <div class="totals" id="topbar-totals"></div>
     </div>
     <div id="main"></div>
@@ -258,7 +259,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-16.7';
+const BUILD='2026-09-16.10';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -679,6 +680,12 @@ const ENGINE={
     // 11. loan-account credits not marked transfer (repayments read as income)
     const loanInc=state.transactions.filter(t=>{const a=acct(t.accountId);return a&&!acctType(a).asset&&t.amount>0&&t.date>=since&&cat(t.categoryId)&&cat(t.categoryId).group!=='Transfers'});
     if(loanInc.length)add('med','Transactions',`${loanInc.length} loan-account credit${loanInc.length>1?'s':''} not categorised as Internal Transfer`,'Repayments arriving on a loan account are the mirror of money that left another account; categorise them Transfers > Internal Transfer so Reports do not double count.','transactions',loanInc.length);
+    // 11b. the same payment categorised as spending on two accounts (bills account -> everyday -> lender,
+    //      both legs given the expense category) - shows as ~200% in Budget
+    {const recent=personalTx().filter(t=>t.amount<0&&t.date>=since&&cashAcct(acct(t.accountId))&&cat(t.categoryId)&&!['Transfers','Income'].includes(cat(t.categoryId).group)).sort((x,y)=>x.date<y.date?-1:1);
+     const pairs=[];const used=new Set();
+     for(let i=0;i<recent.length;i++){const t=recent[i];if(used.has(t.id))continue;for(let j=i+1;j<recent.length;j++){const u=recent[j];if(daysBetween(t.date,u.date)>3)break;if(used.has(u.id)||u.accountId===t.accountId||u.categoryId!==t.categoryId)continue;if(Math.abs(Math.abs(u.amount)-Math.abs(t.amount))<=Math.max(100,Math.abs(t.amount)*0.01)){pairs.push([t,u]);used.add(t.id);used.add(u.id);break}}}
+     if(pairs.length)add('high','Transactions',`${pairs.length} payment${pairs.length>1?'s':''} categorised as spending on two accounts`,`Same amount, same category, different accounts within 3 days - the money passing through (e.g. bills account to Everyday to the lender) has been given the expense category on both legs, so Budget and Reports count it twice. First few: ${pairs.slice(0,3).map(([t,u])=>`${fmt(Math.abs(t.amount))} ${catShort(t.categoryId)} on ${acctName(t.accountId)} and ${acctName(u.accountId)}`).join('; ')}. Keep the category on the leg that reaches the payee; the other leg is Transfers > Internal Transfer.`,'transactions',pairs.length);}
     // 12. income category on negative amounts
     const negInc=personalTx().filter(t=>t.amount<0&&t.date>=since&&cat(t.categoryId)?.group==='Income');
     if(negInc.length)add('low','Transactions',`${negInc.length} expense${negInc.length>1?'s':''} filed under an Income category`,'These show up as "Income" in the spending donut. Recategorise to what they actually were (a reversal goes to the category it refunded).','transactions',negInc.length);
@@ -1382,6 +1389,7 @@ function render(){
     `<div class="nav-item ${state.view===id?'active':''}" data-action="nav" data-view="${id}" tabindex="0" role="button"><span class="ico">${ico}</span>${n}</div>`).join('');
   const vDef=CONFIG.views.find(v=>v[0]===state.view)||CONFIG.views[0];
   $('#view-title').textContent=vDef[1];
+  {const pb=$('#page-report-btn');if(pb)pb.style.display=REPORTS[state.view]?'':'none'}
   $('#sidebar').classList.toggle('collapsed',ui.navCollapsed);
   // topbar totals
   const nw=ENGINE.netWorthNow(),bs=ENGINE.billsSummary();
@@ -1438,7 +1446,12 @@ function billsReportHtml(){
     body+=`<h2>What's left after the transfer <span class="dim">per week</span></h2><table class="half"><tbody>${rows.map(([nm,v],i)=>{run+=v;return`<tr><td>${nm}</td><td class="r">${i?'- '+fmt(Math.abs(v)):fmt(v)}</td><td class="r mut">${i?'leaves '+fmtS(run):''}</td></tr>`}).join('')}<tr class="t"><td>Spare per week</td><td class="r">${fmtS(run)}</td><td class="r mut">${fmtS(Math.round(run*52/12))}/mo</td></tr></tbody></table>`;
   }
   body+=`<div class="foot">Weekly = amount normalised to a week (monthly &times; 12 &divide; 52, quarterly &times; 4 &divide; 52, annual &divide; 52). Monthly = annual &divide; 12. Bills marked outside transfer are paid from another account and excluded from the weekly figure. Generated by FinanceHub ${BUILD}.</div>`;
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Bills Register - ${fmtD(todayISO())}</title><style>
+  return reportShell('Bills Register',body);
+}
+/* shared print shell for every page report: light theme, tiles, tables,
+   Print / Save as PDF button. Body is plain HTML using the classes below. */
+function reportShell(title,body){
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)} - ${fmtD(todayISO())}</title><style>
   body{font:12.5px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;margin:0;padding:28px 34px;background:#fff}
   h1{font-size:22px;margin:0 0 2px;letter-spacing:.02em}h2{font-size:13px;text-transform:uppercase;letter-spacing:.12em;color:#555;margin:22px 0 8px}.sub{color:#666;font-size:12px;margin-bottom:16px}
   .tiles{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}.tile{border:1px solid #ddd;border-radius:6px;padding:10px 14px;min-width:130px;flex:1}.tl{font-size:10.5px;text-transform:uppercase;letter-spacing:.1em;color:#777}.tv{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px}.ts{font-size:11px;color:#777;margin-top:2px}
@@ -1449,8 +1462,134 @@ function billsReportHtml(){
   .bar{position:fixed;top:0;right:0;padding:10px;background:#fff}.bar button{font:inherit;padding:6px 14px;border:1px solid #333;background:#fff;border-radius:4px;cursor:pointer}
   @media print{.bar{display:none}body{padding:0}tr.g td{-webkit-print-color-adjust:exact;print-color-adjust:exact}.two{page-break-inside:avoid}}
   @page{margin:14mm}
+  .pos{color:#1a7f37}.neg{color:#b42318}.small{font-size:11px}.wrap{white-space:normal}
   </style></head><body><div class="bar"><button onclick="window.print()">Print / Save as PDF</button></div>${body}</body></html>`;
 }
+const RPT={
+  tile:(l,v,sub)=>`<div class="tile"><div class="tl">${l}</div><div class="tv">${v}</div>${sub?`<div class="ts">${sub}</div>`:''}</div>`,
+  head:(title,sub)=>`<h1>${esc(title)}</h1><div class="sub">Prepared ${fmtD(todayISO())}${sub?' &middot; '+sub:''}</div>`,
+  foot:(note)=>`<div class="foot">${note?note+' ':''}Generated by FinanceHub ${BUILD}.</div>`,
+  table:(cols,rows,tot)=>`<table><thead><tr>${cols.map(c=>`<th class="${c.r?'r':''}">${c.h}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr class="${r._cls||''}">${cols.map(c=>`<td class="${c.r?'r':''} ${c.mut?'mut':''}">${r[c.k]??''}</td>`).join('')}</tr>`).join('')}${tot?`<tr class="t">${cols.map(c=>`<td class="${c.r?'r':''}">${tot[c.k]??''}</td>`).join('')}</tr>`:''}</tbody></table>`,
+  open(html,name){const w=window.open('','_blank');if(w&&w.document){w.document.open();w.document.write(html);w.document.close()}else saveViaFS(`${name}-${todayISO()}.html`,html,'HTML report','.html','text/html')},
+  m:v=>fmt(Math.round(v))
+};
+/* ---- per-page reports ---- */
+const REPORTS={
+  dashboard(){
+    const nw=ENGINE.netWorthNow(),s=ENGINE.billsSummary(),ps=ENGINE.paySplit(),bl=activeDebts().length?ENGINE.baseline():null,hc=ENGINE.healthCheck();
+    const mk=monthKey(todayISO());let inc=0,exp=0;
+    for(const t of state.transactions){if(monthKey(t.date)!==mk)continue;const c=byId(state.categories,t.categoryId),a=byId(state.accounts,t.accountId);if(a&&a.excludeReports)continue;if((c&&c.group==='Transfers')||(a&&!isAsset(a)))continue;if(t.amount>0)inc+=t.amount;else exp+=-t.amount}
+    const up=ENGINE.upcomingBills(14);
+    let b=RPT.head('Household Summary',fmtMY(mk+'-01'));
+    b+=`<div class="tiles">${RPT.tile('Net worth',fmtS(nw.net),`assets ${fmt0(nw.assets)} / debt ${fmt0(nw.liab)}`)}${RPT.tile('Weekly bills transfer',RPT.m(s.final),`${s.count} bills`)}${RPT.tile('This month in',fmt(inc),'excl. transfers')}${RPT.tile('This month out',fmt(exp),'surplus '+fmtS(inc-exp))}${RPT.tile('Pay Split surplus',fmtS(Math.round(ps.surplus))+'/mo','after bills, minimums, living')}${bl?RPT.tile('Debt-free at minimums',fmtMY(bl.debtFreeDate),fmt0(bl.totalInterest)+' interest'):''}</div>`;
+    b+='<h2>Accounts</h2>'+RPT.table([{h:'Account',k:'n'},{h:'Type',k:'t',mut:1},{h:'Balance',k:'b',r:1}],activeAccounts().sort(acctCmp).map(a=>({n:esc(a.name),t:acctType(a).n,b:`<span class="${isAsset(a)?'':'neg'}">${fmt(Math.abs(a.balance))}</span>`})));
+    if(activeDebts().length)b+='<h2>Open debts</h2>'+RPT.table([{h:'Debt',k:'n'},{h:'Rate',k:'r',r:1},{h:'Minimum /mo',k:'m',r:1},{h:'Balance',k:'b',r:1}],activeDebts().map(d=>({n:esc(d.name),r:(d.rate||0)+'%',m:RPT.m(ENGINE.minMonthly(d)),b:fmt(d.balance)})),{n:'Total',b:fmt(sum(activeDebts().map(d=>d.balance)))});
+    b+='<div class="two"><div><h2>Due in the next 14 days</h2>'+(up.length?RPT.table([{h:'Bill',k:'n'},{h:'Due',k:'d',mut:1},{h:'Amount',k:'a',r:1}],up.map(u=>({n:esc(u.bill.name),d:fmtD(u.bill.nextDue)+(u.days<0?' (overdue)':''),a:fmt(u.bill.amount)})),{n:'Total',a:fmt(sum(up.map(u=>u.bill.amount)))}):'<p class="mut">Nothing due.</p>')+'</div>';
+    b+='<div><h2>Health check</h2>'+(hc.length?`<table><tbody>${hc.map(i=>`<tr><td class="mut small">${i.sev==='high'?'FIX':i.sev==='med'?'CHECK':'TIDY'}</td><td class="wrap">${esc(i.title)}</td></tr>`).join('')}</tbody></table>`:'<p class="pos">No findings.</p>')+'</div></div>';
+    return reportShell('Household Summary',b+RPT.foot());
+  },
+  accounts(){
+    const act=activeAccounts().sort(acctCmp),arch=state.accounts.filter(a=>a.archived);
+    const groups=new Map();for(const a of act){const k=isAsset(a)?'Assets':'Debts';if(!groups.has(k))groups.set(k,[]);groups.get(k).push(a)}
+    const nw=ENGINE.netWorthNow();
+    let b=RPT.head('Accounts',`${act.length} active, ${arch.length} archived`);
+    b+=`<div class="tiles">${RPT.tile('Assets',fmt0(nw.assets))}${RPT.tile('Debts',fmt0(nw.liab))}${RPT.tile('Net worth',fmtS(nw.net))}</div>`;
+    for(const [g,list] of groups){b+=`<h2>${g}</h2>`+RPT.table([{h:'Account',k:'n'},{h:'Institution',k:'i',mut:1},{h:'Type',k:'t',mut:1},{h:'Rate',k:'r',r:1,mut:1},{h:'Balance updated',k:'u',mut:1},{h:'Transactions',k:'x',r:1,mut:1},{h:'Balance',k:'b',r:1}],list.map(a=>({n:esc(a.name)+(a.excludeReports?' <span class="tag">business</span>':''),i:esc(a.institution||''),t:acctType(a).n,r:a.rate?a.rate+'%':'',u:(a.history&&a.history.length)?fmtD(a.history[a.history.length-1].date):'-',x:state.transactions.filter(t=>t.accountId===a.id).length||'',b:fmt(Math.abs(a.balance))})),{n:'Total',b:fmt(sum(list.map(a=>Math.abs(a.balance))))})}
+    if(arch.length)b+='<h2>Archived</h2>'+RPT.table([{h:'Account',k:'n'},{h:'Closed',k:'c',mut:1},{h:'Last balance',k:'b',r:1}],arch.map(a=>({n:esc(a.name),c:a.closedDate?fmtD(a.closedDate):'-',b:fmt(Math.abs(a.balance))})));
+    return reportShell('Accounts',b+RPT.foot());
+  },
+  transactions(){
+    const list=txFiltered().slice().sort((a,b)=>a.date<b.date?-1:1);const f=ui.txFilter;
+    const desc=[f.account?'account '+acctName(f.account):'',f.category?'category '+catShort(f.category):'',f.from||f.to?`${f.from?fmtD(f.from):'start'} to ${f.to?fmtD(f.to):'today'}`:'',f.q?`search "${esc(f.q)}"`:''].filter(Boolean).join(', ')||'all transactions';
+    const inc=sum(list.filter(t=>t.amount>0).map(t=>t.amount)),exp=sum(list.filter(t=>t.amount<0).map(t=>-t.amount));
+    const byCat={};for(const t of list){if(t.amount>=0)continue;const k=t.categoryId?catShort(t.categoryId):'Uncategorised';byCat[k]=(byCat[k]||0)-t.amount}
+    let b=RPT.head('Transactions',`${list.length} rows &middot; ${desc}`);
+    b+=`<div class="tiles">${RPT.tile('In',fmt(inc))}${RPT.tile('Out',fmt(exp))}${RPT.tile('Net',fmtS(inc-exp))}</div>`;
+    b+='<h2>By category</h2>'+RPT.table([{h:'Category',k:'c'},{h:'Spent',k:'a',r:1},{h:'Share',k:'p',r:1,mut:1}],Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([c,v])=>({c:esc(c),a:fmt(v),p:exp?(v/exp*100).toFixed(0)+'%':''})));
+    const cap=list.slice(-800);
+    b+=`<h2>Listing${list.length>cap.length?` <span class="dim">last ${cap.length} of ${list.length}</span>`:''}</h2>`+RPT.table([{h:'Date',k:'d',mut:1},{h:'Payee',k:'p'},{h:'Account',k:'a',mut:1},{h:'Category',k:'c',mut:1},{h:'Amount',k:'m',r:1}],cap.map(t=>({d:fmtD(t.date),p:esc(t.payee),a:esc(acctName(t.accountId)),c:t.categoryId?esc(catShort(t.categoryId)):'-',m:`<span class="${t.amount<0?'neg':'pos'}">${fmtS(t.amount)}</span>`})));
+    return reportShell('Transactions',b+RPT.foot());
+  },
+  budget(){
+    const mk=ui.budgetMonth,budget=state.budgets[mk]||{},actuals=ui.budgetSmooth!==false?ENGINE.monthActualsSmoothed(mk):ENGINE.monthActuals(mk);
+    const rows=[];let bT=0,aT=0;
+    for(const c of state.categories){const bv=budget[c.id]||0,av=actuals[c.id]||0;if(!bv&&!av)continue;const isInc=c.group==='Income';if(isInc||c.group==='Transfers')continue;const actual=Math.max(0,-av);bT+=bv;aT+=actual;rows.push({g:c.group,c:esc(c.name),b:fmt(bv),a:fmt(actual),v:`<span class="${actual>bv&&bv?'neg':'pos'}">${fmtS(bv-actual)}</span>`,p:bv?Math.round(actual/bv*100)+'%':'-'})}
+    rows.sort((x,y)=>x.g<y.g?-1:x.g>y.g?1:0);
+    let b=RPT.head('Budget vs Actual',fmtMY(mk+'-01')+(ui.budgetSmooth!==false?' &middot; lumpy bills spread across their cycle':''));
+    b+=`<div class="tiles">${RPT.tile('Budgeted',fmt(bT))}${RPT.tile('Actual',fmt(aT))}${RPT.tile('Variance',fmtS(bT-aT),bT-aT>=0?'under budget':'over budget')}</div>`;
+    b+=RPT.table([{h:'Group',k:'g',mut:1},{h:'Category',k:'c'},{h:'Budget',k:'b',r:1},{h:'Actual',k:'a',r:1},{h:'Variance',k:'v',r:1},{h:'Used',k:'p',r:1,mut:1}],rows,{c:'Total',b:fmt(bT),a:fmt(aT),v:fmtS(bT-aT)});
+    return reportShell('Budget',b+RPT.foot());
+  },
+  debts(){
+    const ds=activeDebts(),closed=state.debts.filter(d=>d.closed),bl=ds.length?ENGINE.baseline():null;
+    let b=RPT.head('Debts',`${ds.length} open, ${closed.length} closed`);
+    b+=`<div class="tiles">${RPT.tile('Total owing',fmt0(sum(ds.map(d=>d.balance))))}${RPT.tile('Minimums',RPT.m(ENGINE.minimumsMonthly())+'/mo')}${bl?RPT.tile('Debt-free at minimums',fmtMY(bl.debtFreeDate),bl.totalMonths+' months'):''}${bl?RPT.tile('Interest at minimums',fmt0(bl.totalInterest)):''}</div>`;
+    b+=RPT.table([{h:'Debt',k:'n'},{h:'Type',k:'t',mut:1},{h:'Rate',k:'r',r:1},{h:'Minimum /mo',k:'m',r:1},{h:'Actual /mo (3mo)',k:'a',r:1,mut:1},{h:'Funded',k:'f',mut:1},{h:'Balance',k:'b',r:1}],ds.map(d=>{const ps=ENGINE.debtPayStats(d);return{n:esc(d.name)+(d.linkedAccountId?`<div class="mut small">${esc(acctName(d.linkedAccountId))}</div>`:''),t:esc(d.type||''),r:(d.rate||0)+'%',m:RPT.m(ENGINE.minMonthly(d)),a:ps.count?fmt(ps.avgMo):'-',f:d.viaBills?'via bills transfer':'direct',b:fmt(d.balance)}}),{n:'Total',m:RPT.m(ENGINE.minimumsMonthly()),b:fmt(sum(ds.map(d=>d.balance)))});
+    if(bl&&bl.milestones&&bl.milestones.length)b+='<h2>Payoff order at minimums</h2>'+RPT.table([{h:'When',k:'d',mut:1},{h:'Milestone',k:'t'}],bl.milestones.map(m=>({d:fmtMY(m.date),t:esc(m.text)})));
+    if(closed.length)b+='<h2>Closed and paid off</h2>'+RPT.table([{h:'Debt',k:'n'},{h:'Closed',k:'c',mut:1},{h:'Total repaid',k:'t',r:1}],closed.map(d=>({n:esc(d.name),c:d.closedDate?fmtD(d.closedDate):'-',t:fmt(ENGINE.debtPayStats(d).total)})));
+    return reportShell('Debts',b+RPT.foot());
+  },
+  paysplit(){
+    const ps=ENGINE.paySplit(),al=ENGINE.allocAmounts(),a=state.settings.alloc||{debt:70,goals:20,keep:10};
+    const cyc=state.settings.payCycle||'fortnightly',per={weekly:52/12,fortnightly:26/12,monthly:1}[cyc]||1,cv=v=>Math.round(v/per);
+    let b=RPT.head('Pay Split',`per ${cyc==='weekly'?'week':cyc==='fortnightly'?'fortnight':'month'}`);
+    b+=`<div class="tiles">${RPT.tile('Income',fmt(cv(ps.income)))}${RPT.tile('Bills transfer',fmt(cv(ps.bills)))}${RPT.tile('Minimums outside transfer',fmt(cv(ps.mins)))}${RPT.tile('Living spend',fmt(cv(ps.spend)),ps.spendSrc)}${RPT.tile('Surplus',fmtS(cv(ps.surplus)))}</div>`;
+    b+='<h2>Income sources</h2>'+RPT.table([{h:'Source',k:'s'},{h:'Amount',k:'a',r:1},{h:'Frequency',k:'f',mut:1},{h:'Per month',k:'m',r:1}],state.incomes.map(i=>({s:esc(i.source||i.name||''),a:fmt(i.amount),f:i.freq,m:RPT.m(ENGINE.freqMonthly(i.amount,i.freq))})),{s:'Total',m:RPT.m(ps.income)});
+    let run=0;const lines=[['Income',ps.income],['Bills transfer',-ps.bills],['Debt minimums outside the transfer',-ps.mins],['Living spend ('+ps.spendSrc+')',-ps.spend]];
+    b+='<h2>Where it goes</h2><table class="half"><tbody>'+lines.map(([nm,v],i)=>{run+=v;return`<tr><td>${nm}</td><td class="r">${i?'- '+fmt(cv(Math.abs(v))):fmt(cv(v))}</td><td class="r mut">${i?'leaves '+fmtS(cv(run)):''}</td></tr>`}).join('')+`<tr class="t"><td>Surplus</td><td class="r">${fmtS(cv(run))}</td><td></td></tr></tbody></table>`;
+    b+='<h2>Surplus allocation</h2>'+RPT.table([{h:'Destination',k:'d'},{h:'Share',k:'s',r:1,mut:1},{h:'Per pay',k:'p',r:1},{h:'Per month',k:'m',r:1}],[{d:'Extra debt repayment',s:a.debt+'%',p:fmt(cv(al.debt)),m:fmt(al.debt)},{d:'Savings goals',s:a.goals+'%',p:fmt(cv(al.goals)),m:fmt(al.goals)},{d:'Keep / buffer',s:a.keep+'%',p:fmt(cv(al.keep)),m:fmt(al.keep)}],{d:'Total',p:fmt(cv(al.surplus)),m:fmt(al.surplus)});
+    if(ps.minsWarns&&ps.minsWarns.length)b+=`<p class="neg small">Bills in the transfer under-fund a minimum: ${ps.minsWarns.map(w=>`${esc(w.name)} bill ${fmt(w.billM)}/mo vs minimum ${fmt(w.minM)}/mo`).join('; ')}.</p>`;
+    return reportShell('Pay Split',b+RPT.foot());
+  },
+  payoff(){
+    const simDebts=ENGINE.buildSimDebts(),bl=ENGINE.baseline();
+    const scs=state.scenarios.map(sc=>({sc,sim:ENGINE.simulate(simDebts,ENGINE.scenarioOpts(sc))}));
+    let b=RPT.head('Payoff Planner',`${activeDebts().length} debts &middot; ${scs.length} scenario${scs.length===1?'':'s'}`);
+    b+=`<div class="tiles">${RPT.tile('Baseline (minimums only)',fmtMY(bl.debtFreeDate),bl.totalMonths+' months')}${RPT.tile('Interest at minimums',fmt0(bl.totalInterest))}${RPT.tile('Surplus to debt',fmt(ENGINE.allocAmounts().debt)+'/mo','from Pay Split')}</div>`;
+    b+=RPT.table([{h:'Scenario',k:'n'},{h:'Strategy',k:'s',mut:1},{h:'Extra /mo',k:'e',r:1},{h:'Debt-free',k:'d'},{h:'Months',k:'m',r:1},{h:'Interest',k:'i',r:1},{h:'Saved vs baseline',k:'v',r:1},{h:'Sooner by',k:'q',r:1}],[{n:'Baseline',s:'minimums only',e:'-',d:fmtMY(bl.debtFreeDate),m:bl.totalMonths,i:fmt(bl.totalInterest),v:'-',q:'-',_cls:'g'}].concat(scs.map(({sc,sim})=>({n:esc(sc.name),s:esc(sc.strategy||''),e:fmt(ENGINE.scenarioOpts(sc).extraMonthly),d:fmtMY(sim.debtFreeDate),m:sim.totalMonths,i:fmt(sim.totalInterest),v:`<span class="pos">${fmt(Math.max(0,bl.totalInterest-sim.totalInterest))}</span>`,q:Math.max(0,bl.totalMonths-sim.totalMonths)+' mo'}))));
+    for(const {sc,sim} of scs)if(sim.milestones&&sim.milestones.length)b+=`<h2>${esc(sc.name)} - milestones</h2>`+RPT.table([{h:'When',k:'d',mut:1},{h:'Milestone',k:'t'}],sim.milestones.map(m=>({d:fmtMY(m.date),t:esc(m.text)})));
+    return reportShell('Payoff Planner',b+RPT.foot());
+  },
+  goals(){
+    const gs=state.goals.map(g=>({g,st:ENGINE.goalStats(g)}));
+    let b=RPT.head('Savings Goals',`${gs.length} goal${gs.length===1?'':'s'}`);
+    b+=`<div class="tiles">${RPT.tile('Target total',fmt0(sum(gs.map(x=>x.g.target))))}${RPT.tile('Saved so far',fmt0(sum(gs.map(x=>x.st.current))))}${RPT.tile('Remaining',fmt0(sum(gs.map(x=>x.st.remaining))))}</div>`;
+    b+=RPT.table([{h:'Goal',k:'n'},{h:'Account',k:'a',mut:1},{h:'Target',k:'t',r:1},{h:'Saved',k:'s',r:1},{h:'Progress',k:'p',r:1,mut:1},{h:'Target date',k:'d',mut:1},{h:'Needed /fortnight',k:'f',r:1},{h:'On current pace',k:'j',mut:1}],gs.map(({g,st})=>({n:esc(g.name),a:g.accountId?esc(acctName(g.accountId)):'-',t:fmt(g.target),s:fmt(st.current),p:Math.round(st.pct*100)+'%',d:g.targetDate?fmtD(g.targetDate):'-',f:st.remaining>0?fmt(Math.round(st.perFn)):'-',j:st.projDate?fmtD(st.projDate):'no pace yet'})));
+    return reportShell('Savings Goals',b+RPT.foot());
+  },
+  networth(){
+    const nw=ENGINE.netWorthNow(),snaps=state.snapshots.slice().sort((a,b)=>a.date<b.date?-1:1);
+    let b=RPT.head('Net Worth',fmtD(todayISO()));
+    b+=`<div class="tiles">${RPT.tile('Assets',fmt0(nw.assets))}${RPT.tile('Liabilities',fmt0(nw.liab))}${RPT.tile('Net worth',fmtS(nw.net))}${snaps.length>1?RPT.tile('Change since first snapshot',fmtS(nw.net-(snaps[0].assets-snaps[0].liabilities)),'since '+fmtD(snaps[0].date)):''}</div>`;
+    const assets=activeAccounts().filter(isAsset).sort(acctCmp),liabs=activeAccounts().filter(a=>!isAsset(a)).sort(acctCmp);
+    b+='<div class="two"><div><h2>Assets</h2>'+RPT.table([{h:'Account',k:'n'},{h:'Balance',k:'b',r:1}],assets.map(a=>({n:esc(a.name),b:fmt(a.balance)})),{n:'Total',b:fmt(nw.assets)})+'</div>';
+    b+='<div><h2>Liabilities</h2>'+RPT.table([{h:'Account',k:'n'},{h:'Balance',k:'b',r:1}],liabs.map(a=>({n:esc(a.name),b:fmt(Math.abs(a.balance))})),{n:'Total',b:fmt(nw.liab)})+'</div></div>';
+    if(snaps.length)b+='<h2>History</h2>'+RPT.table([{h:'Date',k:'d',mut:1},{h:'Assets',k:'a',r:1},{h:'Liabilities',k:'l',r:1},{h:'Net worth',k:'n',r:1},{h:'Change',k:'c',r:1,mut:1}],snaps.map((s,i)=>{const net=s.assets-s.liabilities,prev=i?snaps[i-1].assets-snaps[i-1].liabilities:null;return{d:fmtD(s.date),a:fmt0(s.assets),l:fmt0(s.liabilities),n:fmtS(net),c:prev==null?'':`<span class="${net-prev>=0?'pos':'neg'}">${fmtS(net-prev)}</span>`}}));
+    return reportShell('Net Worth',b+RPT.foot());
+  },
+  reports(){
+    const r=ui.reportRange,ptx=personalTx().filter(t=>t.date>=r.from&&t.date<=r.to);
+    const notTr=t=>{const c=byId(state.categories,t.categoryId);return !(c&&c.group==='Transfers')};
+    const byGroup={},byCat={};let inc=0,exp=0;
+    for(const t of ptx){if(!notTr(t))continue;if(t.amount>0){inc+=t.amount;continue}exp+=-t.amount;const c=byId(state.categories,t.categoryId);const g=c?c.group:'Uncategorised',cn=c?c.group+' > '+c.name:'Uncategorised';byGroup[g]=(byGroup[g]||0)-t.amount;byCat[cn]=(byCat[cn]||0)-t.amount}
+    const months=[];for(let d=monthKey(r.from);d<=monthKey(r.to);d=monthKey(addMonths(d+'-01',1)))months.push(d);
+    let b=RPT.head('Spending Report',`${fmtD(r.from)} to ${fmtD(r.to)} &middot; ${ptx.length} transactions &middot; transfers excluded`);
+    const nMo=Math.max(1,months.length);
+    b+=`<div class="tiles">${RPT.tile('Income',fmt0(inc),fmt0(inc/nMo)+'/mo avg')}${RPT.tile('Spending',fmt0(exp),fmt0(exp/nMo)+'/mo avg')}${RPT.tile('Net',fmtS(inc-exp))}${RPT.tile('Savings rate',inc?Math.round((inc-exp)/inc*100)+'%':'-')}</div>`;
+    b+='<h2>Spending by group</h2>'+RPT.table([{h:'Group',k:'g'},{h:'Total',k:'t',r:1},{h:'Per month',k:'m',r:1},{h:'Share',k:'p',r:1,mut:1}],Object.entries(byGroup).sort((a,b)=>b[1]-a[1]).map(([g,v])=>({g:esc(g),t:fmt0(v),m:fmt0(v/nMo),p:exp?Math.round(v/exp*100)+'%':''})),{g:'Total',t:fmt0(exp),m:fmt0(exp/nMo)});
+    b+='<h2>Income vs expenses by month</h2>'+RPT.table([{h:'Month',k:'m',mut:1},{h:'Income',k:'i',r:1},{h:'Expenses',k:'e',r:1},{h:'Net',k:'n',r:1}],months.map(mk=>{const i=sum(ptx.filter(t=>monthKey(t.date)===mk&&t.amount>0&&notTr(t)).map(t=>t.amount)),e=sum(ptx.filter(t=>monthKey(t.date)===mk&&t.amount<0&&notTr(t)).map(t=>-t.amount));return{m:fmtMY(mk+'-01'),i:fmt0(i),e:fmt0(e),n:`<span class="${i-e>=0?'pos':'neg'}">${fmtS(i-e)}</span>`}}));
+    b+='<h2>Top categories</h2>'+RPT.table([{h:'Category',k:'c'},{h:'Total',k:'t',r:1},{h:'Per month',k:'m',r:1}],Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,25).map(([c,v])=>({c:esc(c),t:fmt0(v),m:fmt0(v/nMo)})));
+    return reportShell('Spending Report',b+RPT.foot());
+  },
+  review(){
+    const hc=ENGINE.healthCheck();
+    let b=RPT.head('Health Check',`${hc.length} finding${hc.length===1?'':'s'}`);
+    b+=hc.length?RPT.table([{h:'',k:'s',mut:1},{h:'Area',k:'a',mut:1},{h:'Finding',k:'f'}],hc.map(i=>({s:i.sev==='high'?'FIX':i.sev==='med'?'CHECK':'TIDY',a:esc(i.area),f:`<div class="wrap"><b>${esc(i.title)}</b><div class="mut">${i.detail}</div></div>`}))):'<p class="pos">Nothing to flag.</p>';
+    if(ui.reviewText)b+='<h2>Claude\'s review</h2><div class="wrap" style="white-space:pre-wrap">'+esc(ui.reviewText)+'</div>';
+    return reportShell('Health Check',b+RPT.foot());
+  },
+  bills(){return billsReportHtml()}
+};
 function dueBadge(days){
   if(days<0)return`<span class="badge rd">OVERDUE ${-days}d</span>`;
   if(days===0)return`<span class="badge rd">DUE TODAY</span>`;
@@ -2012,6 +2151,7 @@ VIEWS.budget=()=>{
     <button class="btn sm" data-action="budget-month" data-d="1">&rarr;</button>
     <button class="btn sm" data-action="budget-copy">Copy from previous month</button>
     <button class="btn sm" data-action="budget-prefill">Pre-fill from bills</button>
+    ${Object.values(budget).some(v=>v)?`<button class="btn sm danger" data-action="budget-clear" title="Remove every budget figure for this month (actuals are untouched)">Clear month</button>`:''}
     <span class="spacer"></span>
     <span class="sec-label">Show per:</span>
     <select data-change="budget-mode" style="width:130px"><option value="monthly" ${!perFn?'selected':''}>Month</option><option value="fortnightly" ${perFn?'selected':''}>Fortnight</option></select>
@@ -2043,8 +2183,12 @@ VIEWS.budget=()=>{
       const actual=isInc?Math.max(0,av):Math.max(0,-av);
       const p=bv>0?actual/bv:0;
       const cls=isInc?(p>=1?'':'warn'):(p>1?'over':p>0.85?'warn':'');
-      h+=`<tr>
-        <td>${esc(c.name)} ${billCats[c.id]?`<span class="badge bl" title="Backed by bills register (${fmt(Math.round(billCats[c.id]))}/mo)">BILLS</span>`:''}${(n=>smooth&&n>1?` <span class="badge" title="Paid every ${n} months - each payment is spread across ${n} months so it compares to the monthly budget">/${n}MO</span>`:'')(Math.max(1,...state.bills.filter(b=>b.active!==false&&b.categoryId===c.id).map(ENGINE.billCycleMonths)))}</td>
+      const bills=state.bills.filter(b=>b.active!==false&&b.categoryId===c.id);
+      const cyc=Math.max(1,...bills.map(ENGINE.billCycleMonths));
+      // name on line 1, bill facts on line 2 (always present so rows keep one shape)
+      const meta=billCats[c.id]?`<span class="badge bl" title="${bills.map(b=>esc(b.name)).join(', ')}">BILLS</span> <span class="num">${fmt(Math.round(billCats[c.id]))}/mo</span>${smooth&&cyc>1?` &middot; <span title="Paid every ${cyc} months - each payment is spread across ${cyc} months so it compares to the monthly budget">spread /${cyc}mo</span>`:''}`:'<span class="dim">Not bill-backed</span>';
+      h+=`<tr class="ln">
+        <td><div>${esc(c.name)}</div><div class="meta" style="color:var(--tx3)">${meta}</div></td>
         <td class="r"><input data-change="budget-set" data-cat="${c.id}" value="${bv?(conv(bv)/100).toFixed(2):''}" placeholder="0.00" style="width:100px;text-align:right;background:transparent;border-color:#242424"></td>
         <td class="r mut">${bv?fmt(perFn?bv:bv*12/26):''}</td>
         <td class="r mut">${bv?fmt0(bv*12):''}</td>
@@ -2893,12 +3037,8 @@ ${JSON.stringify(reviewSummary())}`;
     const csv=rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n');
     saveViaFS(`financehub-bills-${todayISO()}.csv`,csv,'CSV file','.csv','text/csv');
   },
-  'bill-report':()=>{
-    const html=billsReportHtml();
-    const w=window.open('','_blank');
-    if(w&&w.document){w.document.open();w.document.write(html);w.document.close()}
-    else saveViaFS(`bills-register-${todayISO()}.html`,html,'HTML report','.html','text/html');
-  },
+  'bill-report':()=>{RPT.open(billsReportHtml(),'bills-register')},
+  'page-report':()=>{const fn=REPORTS[state.view];if(!fn)return toast('No report for this page');RPT.open(fn(),state.view)},
   'bill-cancel':async el=>{
     const b=byId(state.bills,el.dataset.id);
     if(b.autoFrom)return toast('This bill is managed by a debt - close the debt instead');
@@ -2934,6 +3074,14 @@ ${JSON.stringify(reviewSummary())}`;
 
   /* ---- budget ---- */
   'budget-month':el=>{ui.budgetMonth=monthKey(addMonths(ui.budgetMonth+'-01',+el.dataset.d));render()},
+  'budget-clear':async()=>{
+    const mk=ui.budgetMonth,b=state.budgets[mk]||{};
+    const cnt=Object.values(b).filter(v=>v).length;
+    if(!cnt)return toast('Nothing budgeted for '+fmtMY(mk+'-01'));
+    if(await MODAL.confirm('Clear Budget',`Remove all <b>${cnt}</b> budget figure${cnt>1?'s':''} for <b>${fmtMY(mk+'-01')}</b>? Other months are untouched and your actual transactions are not affected - this only blanks the Budget column. You can Pre-fill from bills or Copy from previous month to rebuild it.`,{danger:true,okLabel:'Clear month'})){
+      delete state.budgets[mk];save();render();toast(fmtMY(mk+'-01')+' budget cleared');
+    }
+  },
   'budget-copy':()=>{
     const prev=monthKey(addMonths(ui.budgetMonth+'-01',-1));
     if(!state.budgets[prev])return toast('No budget found for '+fmtMY(prev+'-01'));
