@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-17.14';
+const BUILD='2026-09-17.15';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -1011,7 +1011,11 @@ const ENGINE={
       const manual=p.billId===b.id;
       const a=Math.abs(p.amount);
       if(!manual&&b.amount&&a<b.amount*0.1)continue;   // noise
-      const partial=manual||!b.amount||a<b.amount*0.9; // can this merge?
+      // only PART-payments merge. A payment that is itself a full amount (or
+      // more - a true-up landing the same day as a weekly debit) stands alone
+      // even when hand-linked; merging is for a rego paid two ways, not for
+      // stacking a $452 true-up onto a $60 smoothing debit
+      const partial=!b.amount||a<b.amount*0.9;
       const ev=events[events.length-1];
       if(partial&&ev&&ev.open&&Math.abs(daysBetween(p.date,ev.date))<=3){ev.total+=a;ev.txs.push(p);if(manual)ev.manual=true}
       else events.push({date:p.date,total:a,txs:[p],manual,open:partial});
@@ -1026,7 +1030,7 @@ const ENGINE={
     // events feed the drift average. Plausibility filter (50%-200% of the
     // registered amount) keeps incidental keyword matches out, but manually
     // linked events are always trusted.
-    const evs=ENGINE.billPaymentEvents(b).filter(e=>e.manual||(e.total>=b.amount*0.5&&e.total<=b.amount*2)).slice(0,3);
+    const evs=ENGINE.billPaymentEvents(b).filter(e=>!b.amount||(e.total>=b.amount*0.5&&e.total<=b.amount*2)).slice(0,3);
     if(evs.length>=2){
       const avg=Math.round(sum(evs.map(e=>e.total))/evs.length);
       const pc=b.amount?((avg-b.amount)/b.amount*100):0;
@@ -1036,7 +1040,9 @@ const ENGINE={
     // 8 weeks" but paid as $60 weekly debits plus a true-up. No single payment
     // resembles the registered amount, so compare the RATE instead - everything
     // the keyword matched over the last two cycles, expressed per cycle.
-    const pays=ENGINE.billPayments(b);
+    // anything over 3x the registered amount is not a payment of this bill -
+    // a loan drawdown or payout caught by the lender's keyword, a refund reversal
+    const pays=ENGINE.billPayments(b).filter(p=>Math.abs(p.amount)<=b.amount*3);
     if(pays.length<2||!b.amount)return null;
     const cyc=ENGINE.billCycleDays(b),today=todayISO(),start=addDays(today,-Math.round(cyc*2));
     const win=pays.filter(p=>p.date>=start);
