@@ -260,7 +260,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-17.1';
+const BUILD='2026-09-17.2';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -467,7 +467,9 @@ function billFreqLabel(b){
 function billMetaLine(b){
   if(b.freq==='schedule'){const r=ENGINE.scheduleRemaining(b);return b.scheduleDone?{t:'All instalments paid',c:'var(--gn)'}:{t:`${r.count} of ${r.of} instalment${r.of===1?'':'s'} left &middot; ${fmt(r.total)} to go`,c:'var(--tx3)'}}
   const dr=ENGINE.billDrift(b);
-  if(dr){const off=Math.abs(dr.pc)>10;return{t:`Actuals avg ${fmt(dr.avg)}${off?` &middot; ${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered`:''}`,c:off?'var(--am)':'var(--tx3)',title:off?'Update the amount so the weekly transfer matches what is really coming out':''}}
+  if(dr){const off=Math.abs(dr.pc)>10;
+    if(dr.rate)return{t:`Actuals ${fmt(dr.avg)} per ${billFreqLabel(b).toLowerCase().replace(/^every /,'')}${off?` &middot; ${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered`:''} &middot; paid as ${dr.n} debits`,c:off?'var(--am)':'var(--tx3)',title:'Smoothing plan: no single debit matches the registered amount, so this compares the total matched over the last two cycles against the registered amount per cycle'};
+    return{t:`Actuals avg ${fmt(dr.avg)}${off?` &middot; ${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered`:''}`,c:off?'var(--am)':'var(--tx3)',title:off?'Update the amount so the weekly transfer matches what is really coming out':''}}
   // one match is not enough for a drift average, but it is a match
   const lp=ENGINE.billLastPaid(b);
   if(lp)return{t:`1 payment matched &middot; ${fmt(lp.total)} on ${fmtD(lp.date)}`,c:'var(--tx3)',title:'The actuals average appears once two payments have matched'};
@@ -977,15 +979,32 @@ const ENGINE={
     events.forEach(e=>delete e.open);
     return events;
   },
+  billCycleDays(b){
+    switch(b.freq){case 'weekly':return 7;case 'fortnightly':return 14;case 'monthly':return 30.44;case 'quarterly':return 91.3;case 'halfyearly':return 182.6;case 'annual':return 365;case 'customN':return 7*(b.everyN||1);case 'schedule':return ENGINE.billCycleMonths(b)*30.44;default:return 30.44}
+  },
   billDrift(b){
     // events feed the drift average. Plausibility filter (50%-200% of the
     // registered amount) keeps incidental keyword matches out, but manually
     // linked events are always trusted.
     const evs=ENGINE.billPaymentEvents(b).filter(e=>e.manual||(e.total>=b.amount*0.5&&e.total<=b.amount*2)).slice(0,3);
-    if(evs.length<2)return null;
-    const avg=Math.round(sum(evs.map(e=>e.total))/evs.length);
-    const pc=b.amount?((avg-b.amount)/b.amount*100):0;
-    return{avg,pc,n:evs.length,last:evs[0]};
+    if(evs.length>=2){
+      const avg=Math.round(sum(evs.map(e=>e.total))/evs.length);
+      const pc=b.amount?((avg-b.amount)/b.amount*100):0;
+      return{avg,pc,n:evs.length,last:evs[0]};
+    }
+    // Rate fallback for smoothing plans: a bill registered as "$1,000 every
+    // 8 weeks" but paid as $60 weekly debits plus a true-up. No single payment
+    // resembles the registered amount, so compare the RATE instead - everything
+    // the keyword matched over the last two cycles, expressed per cycle.
+    const pays=ENGINE.billPayments(b);
+    if(pays.length<2||!b.amount)return null;
+    const cyc=ENGINE.billCycleDays(b),today=todayISO(),start=addDays(today,-Math.round(cyc*2));
+    const win=pays.filter(p=>p.date>=start);
+    if(win.length<2)return null;
+    const span=Math.max(cyc,daysBetween(win[win.length-1].date,today));
+    const perCycle=Math.round(sum(win.map(p=>Math.abs(p.amount)))*cyc/span);
+    const pc=(perCycle-b.amount)/b.amount*100;
+    return{avg:perCycle,pc,n:win.length,last:{date:win[0].date,total:Math.abs(win[0].amount)},rate:true};
   },
   autoAdvanceBills(){
     // a matched payment near the due date marks the bill paid automatically.
@@ -1026,7 +1045,13 @@ const ENGINE={
      keeps those from moving the due date) */
   billLastPaid(b){
     if(!(b.matchKeyword||'').trim()&&!state.transactions.some(t=>t.billId===b.id))return null;
-    return ENGINE.billPaymentEvents(b).find(e=>e.manual||Math.abs(e.total-b.amount)<=Math.round(b.amount*0.3))||null;
+    const guarded=ENGINE.billPaymentEvents(b).find(e=>e.manual||Math.abs(e.total-b.amount)<=Math.round(b.amount*0.3));
+    if(guarded)return guarded;
+    // smoothing plan: no payment resembles the registered amount, but the
+    // keyword is matching real debits - the latest one is still "last paid"
+    const dr=ENGINE.billDrift(b);
+    if(dr&&dr.rate)return{date:dr.last.date,total:dr.last.total,loose:true};
+    return null;
   },
   debtBalance(d){
     if(d.linkedAccountId){
