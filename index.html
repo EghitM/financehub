@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-17.10';
+const BUILD='2026-09-17.11';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -2044,7 +2044,6 @@ function livingDashboard(){
     h+=`<tr><td>${esc(a.name)}<div class="dim" style="font-size:10.5px">${mine.length} allowance${mine.length===1?'':'s'}</div></td><td class="r num">${fmt(a.balance)}</td><td class="r num">${alMo?fmt(alMo):'<span class="dim">\u2014</span>'}</td><td class="r num">${fmt(spentMo)}</td><td class="r num" style="color:${head>=0?'var(--gn)':'var(--rd)'}">${alMo?fmtS(head):'<span class="dim">no allowance</span>'}</td><td class="dim num" style="font-size:11px">${top.length?top.map(([k,v])=>`${esc(k)} ${fmt0(v/3)}`).join(' &middot; '):'\u2014'}</td></tr>`;
   }
   h+='</tbody></table></div></div></div>';
-  h+=livingBudgetCard(billCats);
   const noPot=allow.filter(b=>!b.toAccountId);
   if(noPot.length)h+=`<div class="card" style="margin-bottom:14px"><h3>Not tracked</h3><p class="dim" style="font-size:12.5px;line-height:1.6">${noPot.map(b=>esc(b.name)).join(', ')} ${noPot.length>1?'have':'has'} no "lands in account" set, so actual spend cannot be compared. Edit and pick the pot it goes to.</p></div>`;
   return h;
@@ -2340,7 +2339,7 @@ VIEWS.bills=()=>{
   for(const b of list){const k=gKey(b);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(b)}
   const shownWk=sum(list.filter(b=>b.active!==false&&b.inTransfer!==false).map(b=>ENGINE.billWeekly(b)));
   const shownAn=sum(list.filter(b=>b.active!==false).map(b=>ENGINE.billAnnual(b)));
-  h+=`<div class="card pad0"><table><thead><tr><th>${(ui.billTab||'bills')==='living'?'Allowance':'Bill'}</th><th>Frequency</th><th>Method</th><th>Last paid</th><th>Next due</th><th class="r">Amount</th><th class="r" title="Amount normalised to a week: monthly x 12 / 52, quarterly x 4 / 52, annual / 52">Weekly</th><th class="r" title="Annual / 12">Monthly</th><th class="r">Annual</th><th></th></tr></thead><tbody>`;
+  h+=`<div class="card pad0"><table><thead><tr><th>${(ui.billTab||'bills')==='living'?'Allowance':'Bill'}</th><th>Frequency</th>${tab==='living'?'<th class="r">Spent this month</th><th class="r">Left</th><th style="width:14%"></th>':'<th>Method</th><th>Last paid</th><th>Next due</th>'}<th class="r">Amount</th><th class="r" title="Amount normalised to a week: monthly x 12 / 52, quarterly x 4 / 52, annual / 52">Weekly</th><th class="r" title="Annual / 12">Monthly</th><th class="r">Annual</th><th></th></tr></thead><tbody>`;
   if(!list.length)h+=`<tr><td colspan="10" class="dim" style="padding:18px">${tab==='living'?(state.bills.some(b=>b.kind==='living')?'No allowances match these filters.':'No living allowances yet - add one, or edit a bill (Revolut, groceries, haircuts) and tick "Living allowance" to move it here.'):'No bills match these filters.'}</td></tr>`;
   for(const [g,bills] of [...groups.entries()].sort((a,b)=>{
       if(ui.billGroup==='none')return 0;
@@ -2361,9 +2360,9 @@ VIEWS.bills=()=>{
         <td>${esc(b.name)}${b.cancelled?` <span class="badge" title="Cancelled${b.cancelledDate?' '+fmtD(b.cancelledDate):''} - kept for history">CANCELLED</span>`:b.active===false?' <span class="badge">PAUSED</span>':''}${b.inTransfer===false?' <span class="badge am" title="Not funded by the weekly transfer - paid from another account">NOT IN TRANSFER</span>':''}${b.debtId?` <span class="badge rd" title="Funds the repayment of '${esc((byId(state.debts,b.debtId)||{}).name||'')}' - Pay Split counts it once">&#9660; ${esc((byId(state.debts,b.debtId)||{}).name||'debt')}</span>`:''}${b.autoFrom?' <span class="badge" title="Managed by the debt - edit the amount or frequency on the debt itself">AUTO</span>':''}${b.notes?` <span class="dim" title="${esc(b.notes)}">&#9776;</span>`:''}
           ${(mt=>`<div class="meta" style="color:${mt.c}" ${mt.title?`title="${esc(mt.title)}"`:''}>${mt.t}</div>`)(billMetaLine(b))}</td>
         <td class="mut">${esc(billFreqLabel(b))}</td>
-        <td class="mut">${esc(b.method||'')}</td>
+        ${tab==='living'?(()=>{const sp=allowanceSpentThisMonth(b),al=Math.round(ENGINE.billMonthly(b)),left=al-sp,p=al?sp/al:(sp?1.01:0);return`<td class="r num"><span class="linkish" data-action="budget-drill" data-cat="${b.categoryId}" data-cyc="1" title="Show this month's transactions">${fmt(sp)}</span></td><td class="r num" style="color:${left>=0?'var(--gn)':'var(--rd)'}">${fmtS(left)}</td><td><div class="pbar"><div class="${p>1?'over':p>monthFrac()+0.1?'warn':''}" style="width:${clamp(p*100,0,100)}%"></div></div></td>`})():`<td class="mut">${esc(b.method||'')}</td>
         ${(lp=>`<td class="mut num" title="${lp?'From transactions: '+fmt(lp.total)+' on '+fmtD(lp.date):'No matching transaction yet - set a match keyword'}">${lp?fmtD(lp.date):'<span class="dim">\u2014</span>'}</td>`)(ENGINE.billLastPaid(b))}
-        <td class="mut">${b.scheduleDone?'<span class="badge gn">COMPLETE</span>':fmtD(b.nextDue)}${b.autoAdvance!==false&&(b.matchKeyword||'').trim()?'':' <span class="dim" title="No keyword or auto-advance off - the due date only moves when you press Paid">&#8226;</span>'}</td>
+        <td class="mut">${b.scheduleDone?'<span class="badge gn">COMPLETE</span>':fmtD(b.nextDue)}${b.autoAdvance!==false&&(b.matchKeyword||'').trim()?'':' <span class="dim" title="No keyword or auto-advance off - the due date only moves when you press Paid">&#8226;</span>'}</td>`}
         <td class="r">${fmt(b.amount)}</td>
         <td class="r ${b.inTransfer===false?'mut':'acc'}">${b.inTransfer===false?'-':fmt(Math.round(ENGINE.billWeekly(b)))}</td>
         <td class="r">${fmt(Math.round(ENGINE.billAnnual(b)/12))}</td>
@@ -2374,11 +2373,37 @@ VIEWS.bills=()=>{
     if(g!==''&&bills.length>1)h+=`<tr class="sub"><td colspan="6">Subtotal &middot; ${esc(g)}</td><td class="r num">${fmt(Math.round(gw))}</td><td class="r num">${fmt(Math.round(ga/12))}</td><td class="r num">${fmt0(ga)}</td><td></td></tr>`;
   }
   const filtered=list.length!==state.bills.filter(b=>(ui.billTab||'bills')==='living'?b.kind==='living':b.kind!=='living').length;
-  h+=`<tr class="tot"><td colspan="5">${filtered?'TOTAL (SHOWN)':'TOTAL (ACTIVE)'}</td><td></td><td class="r acc">${fmt(Math.round(shownWk))}</td><td class="r">${fmt(Math.round(shownAn/12))}</td><td class="r">${fmt0(shownAn)}</td><td></td></tr>`;
+  h+=`<tr class="tot">${tab==='living'?(()=>{const sp=sum(list.map(allowanceSpentThisMonth)),al=sum(list.map(b=>Math.round(ENGINE.billMonthly(b))));return`<td colspan="2">TOTAL</td><td class="r num">${fmt(sp)}</td><td class="r num" style="color:${al-sp>=0?'var(--gn)':'var(--rd)'}">${fmtS(al-sp)}</td><td><div class="pbar"><div class="${sp>al?'over':''}" style="width:${clamp(al?sp/al*100:0,0,100)}%"></div></div></td>`})():`<td colspan="5">${filtered?'TOTAL (SHOWN)':'TOTAL (ACTIVE)'}</td>`}<td></td><td class="r acc">${fmt(Math.round(shownWk))}</td><td class="r">${fmt(Math.round(shownAn/12))}</td><td class="r">${fmt0(shownAn)}</td><td></td></tr>`;
   if(filtered)h+=`<tr><td colspan="5" class="dim" style="font-size:11.5px">All active bills: ${fmt(Math.round(s.weekly))}/wk &middot; ${fmt0(s.annual)}/yr</td><td></td><td class="r dim num" style="font-size:11.5px">${fmt(Math.round(s.weekly))}</td><td class="r dim num" style="font-size:11.5px">${fmt(Math.round(s.annual/12))}</td><td class="r dim num" style="font-size:11.5px">${fmt0(s.annual)}</td><td></td></tr>`;
   h+='</tbody></table></div>';
+  if(tab==='living')h+=livingGapList();
   return h;
 };
+/* spent this calendar month in an allowance's category on the pots
+   (household only, transfers excluded) */
+function monthFrac(){const t=todayISO();const d=new Date(t+'T00:00:00');const days=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();return clamp(d.getDate()/days,0,1)}
+function allowanceSpentThisMonth(b){
+  if(!b.categoryId)return 0;const mk=monthKey(todayISO());const pots=new Set(ENGINE.livingPotIds());
+  return sum(state.transactions.filter(t=>t.categoryId===b.categoryId&&t.amount<0&&monthKey(t.date)===mk&&!isExcludedTx(t)&&(pots.size?pots.has(t.accountId):true)).map(t=>-t.amount));
+}
+/* categories with real living spend and no allowance yet - the to-do list */
+function livingGapList(){
+  const covered=new Set(state.bills.filter(b=>b.active!==false&&b.kind==='living').map(b=>b.categoryId));
+  const billCats=new Set(Object.keys(ENGINE.billBackedCats()));
+  const pots=new Set(ENGINE.livingPotIds());const mk=monthKey(todayISO());const lo=monthKey(addMonths(todayISO(),-3)),hi=monthKey(addMonths(todayISO(),-1));
+  const rows={};
+  for(const t of state.transactions){
+    if(t.amount>=0||isExcludedTx(t)||(pots.size&&!pots.has(t.accountId)))continue;
+    const c=byId(state.categories,t.categoryId);if(!c||['Income','Transfers'].includes(c.group)||billCats.has(c.id)||covered.has(c.id))continue;
+    const m=monthKey(t.date);const r=rows[c.id]=rows[c.id]||{c,thisMo:0,avg:0};
+    if(m===mk)r.thisMo+=-t.amount;if(m>=lo&&m<=hi)r.avg+=-t.amount/3;
+  }
+  const list=Object.values(rows).filter(r=>r.thisMo||r.avg).sort((a,b)=>b.avg-a.avg);
+  if(!list.length)return '';
+  return`<div class="card" style="margin-top:14px"><h3>Not covered by an allowance <span class="r dim" style="font-family:var(--mono);font-size:11px">${list.length} CATEGOR${list.length===1?'Y':'IES'}</span></h3>
+    <p class="dim" style="font-size:12px;line-height:1.6;margin-bottom:8px">Real spending on the pots with no allowance behind it. Add one to fund it from the weekly transfer, or leave it if it is a one-off.</p>
+    <table class="compact"><thead><tr><th>Category</th><th class="r">This month</th><th class="r">3-mo avg /mo</th><th class="r">Suggested /wk</th><th></th></tr></thead><tbody>${list.map(r=>`<tr><td>${esc(r.c.name)}<div class="dim" style="font-size:10.5px">${esc(r.c.group)}</div></td><td class="r num"><span class="linkish" data-action="budget-drill" data-cat="${r.c.id}" data-cyc="1">${fmt(r.thisMo)}</span></td><td class="r num">${fmt(Math.round(r.avg))}</td><td class="r num">${fmt(Math.ceil(r.avg*12/52/500)*500)}</td><td><button class="btn sm" data-action="living-add-cat" data-cat="${r.c.id}" data-wk="${Math.ceil(r.avg*12/52/500)*500}">+ Allowance</button></td></tr>`).join('')}</tbody></table></div>`;
+}
 function billForm(b={}){
   return`${b.autoFrom?`<p style="font-size:12.5px;margin-bottom:12px;color:var(--am)">&#9888; Managed by the debt "${esc((byId(state.debts,b.autoFrom)||{}).name||'')}" - change the amount or frequency on the debt itself, or untick "Fund this repayment from the weekly bills transfer" there. Edits to those fields here are overwritten.</p>`:''}<div class="frow">
     <label class="f"><span class="fl">Bill name</span><input name="name" value="${esc(b.name||'')}" required></label>
@@ -3277,6 +3302,7 @@ const ACTIONS={
     if(made&&state.settings.spendMode!=='allowance')state.settings.spendMode='allowance';
     ui._suggest=null;MODAL.close();save();render();toast(made?`${made} allowance${made>1?'s':''} created - weekly transfer updated`:'Nothing selected');
   },
+  'living-add-cat':el=>{const c=byId(state.categories,el.dataset.cat);ui.editing=null;openForm('Add Living Allowance',billForm({name:c?c.name:'',kind:'living',freq:'weekly',amount:parseInt(el.dataset.wk)||0,categoryId:el.dataset.cat,toAccountId:state.settings.spendsAccountId||(state.settings.livingAccountIds||[])[0]||'',nextDue:todayISO(),method:'Transfer'}),'bill-save')},
   'living-add':()=>{ui.editing=null;openForm('Add Living Allowance',billForm({kind:'living',freq:'weekly',toAccountId:(state.settings.livingAccountIds||[])[0]||'',categoryId:(state.categories.find(c=>c.group==='Transfers')||{}).id||''}),'bill-save')},
   'bill-tab':el=>{ui.billTab=el.dataset.tab;ui.billCollapsed={};render()},
   'bill-clear-filter':()=>{ui.billFilter={q:'',freq:'',transfer:'',status:'active'};render()},
