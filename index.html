@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-17.12';
+const BUILD='2026-09-17.13';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -852,9 +852,15 @@ const ENGINE={
     const pots=ENGINE.livingPotIds();
     const opening=sum(pots.map(id=>(byId(state.accounts,id)||{balance:0}).balance));
     const outWk=Math.round(ENGINE.livingActualMonthly()*12/52);
-    const rows=[];let bal=opening;
-    for(let w=1;w<=weeks;w++){bal+=Math.round(ls.final)-outWk;rows.push({week:w,bal,inn:Math.round(ls.final),out:outWk})}
-    return{rows,opening,inWk:Math.round(ls.final),outWk,net:Math.round(ls.final)-outWk,shortfalls:rows.filter(r=>r.bal<0)};
+    // two points per week so the transfer is visible: balance right after the
+    // top-up lands, then after the week's spend - a sawtooth like the bills chart
+    const rows=[],pts=[];let bal=opening;
+    for(let w=1;w<=weeks;w++){
+      bal+=Math.round(ls.final);pts.push({label:'W'+w,bal,phase:'in'});
+      bal-=outWk;pts.push({label:'',bal,phase:'out'});
+      rows.push({week:w,bal,inn:Math.round(ls.final),out:outWk});
+    }
+    return{rows,pts,opening,inWk:Math.round(ls.final),outWk,net:Math.round(ls.final)-outWk,shortfalls:rows.filter(r=>r.bal<0)};
   },
   /* the living transfer: every active allowance normalised to a week, into
      the spends account (settings.spendsAccountId) */
@@ -2018,8 +2024,8 @@ function livingDashboard(){
   h+=`<div class="card"><h3>Spends Account Health <span class="r dim" style="font-family:var(--mono);font-size:11px">12 WEEK PROJECTION</span></h3>`;
   if(!pots.length)h+=`<p class="dim" style="font-size:12.5px;line-height:1.6">Pick the spends account in the hero to project its balance: living transfer of ${fmt(ls.final)} in each week, average spend out.</p>`;
   else{
-    h+=chart('living-proj',el=>CH.line(el,{labels:proj.rows.map(r=>'W'+r.week),series:[{name:'Projected balance',color:proj.net<0?CONFIG.colors.rd:CONFIG.colors.gn,data:proj.rows.map(r=>r.bal)}],fillFirst:true,height:180}));
-    h+=`<div style="margin-top:10px;font-size:12.5px;font-family:var(--mono);color:${proj.net<0?'var(--rd)':'var(--gn)'}">${proj.net<0?'&#9888;':'&#10003;'} ${fmt(proj.inWk)} in &middot; ${fmt(proj.outWk)} out per week (3-month average) &middot; net ${fmtS(proj.net)}/wk${proj.shortfalls.length?` &middot; pots empty by week ${proj.shortfalls[0].week}`:''} &middot; opening ${fmt(proj.opening)}.</div>`;
+    h+=chart('living-proj',el=>CH.line(el,{labels:proj.pts.map(p=>p.label),series:[{name:'Balance (transfer in, then spend out)',color:proj.net<0?CONFIG.colors.rd:CONFIG.colors.gn,data:proj.pts.map(p=>p.bal)}],fillFirst:true,height:180}));
+    h+=`<div style="margin-top:10px;font-size:12.5px;font-family:var(--mono);color:${proj.net<0?'var(--rd)':'var(--gn)'}">${proj.net<0?'&#9888;':'&#10003;'} Each week: <b>+${fmt(proj.inWk)}</b> transfer lands, <b>-${fmt(proj.outWk)}</b> spent (3-month average) &middot; net ${fmtS(proj.net)}/wk${proj.shortfalls.length?` &middot; pots empty by week ${proj.shortfalls[0].week}`:''} &middot; opening ${fmt(proj.opening)}.</div>`;
   }
   h+='</div>';
   const byCat={};for(const b of allow){const k=b.categoryId?catShort(b.categoryId):'Uncategorised';byCat[k]=(byCat[k]||0)+ENGINE.billAnnual(b)}
