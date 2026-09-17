@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-17.9';
+const BUILD='2026-09-17.10';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -287,7 +287,7 @@ const CONFIG = {
   payFreqs:[['weekly','Weekly',52],['fortnightly','Fortnightly',26],['monthly','Monthly',12]],
   views:[
     ['dashboard','Dashboard','\u25A0'],['accounts','Accounts','\u25A4'],['transactions','Transactions','\u21C6'],
-    ['bills','Bills','\u2261'],['budget','Budget','\u25D1'],['debts','Debts','\u25BC'],
+    ['bills','Bills / Living','\u2261'],['budget','Budget','\u25D1'],['debts','Debts','\u25BC'],
     ['paysplit','Pay Split','\u2696'],['payoff','Payoff Planner','\u2197'],['goals','Savings Goals','\u25CE'],['networth','Net Worth','\u03A3'],
     ['reports','Reports','\u2237'],['review','Health Check','\u2713'],['settings','Settings','\u2699']
   ]
@@ -845,6 +845,17 @@ const ENGINE={
   /* Pay Split's bills line: commitments only - the living allowances inside
      the transfer are reported on the living-spend line instead */
   billsCommitMonthly(){return Math.round(ENGINE.billsSummary().final*52/12)},
+  /* spends-account projection: pots start at their combined balance, the
+     living transfer lands each week, spend leaves at the 3-month average rate */
+  livingProjection(weeks=12){
+    const ls=ENGINE.livingSummary();
+    const pots=ENGINE.livingPotIds();
+    const opening=sum(pots.map(id=>(byId(state.accounts,id)||{balance:0}).balance));
+    const outWk=Math.round(ENGINE.livingActualMonthly()*12/52);
+    const rows=[];let bal=opening;
+    for(let w=1;w<=weeks;w++){bal+=Math.round(ls.final)-outWk;rows.push({week:w,bal,inn:Math.round(ls.final),out:outWk})}
+    return{rows,opening,inWk:Math.round(ls.final),outWk,net:Math.round(ls.final)-outWk,shortfalls:rows.filter(r=>r.bal<0)};
+  },
   /* the living transfer: every active allowance normalised to a week, into
      the spends account (settings.spendsAccountId) */
   livingSummary(){
@@ -1994,45 +2005,48 @@ function txForm(t={}){
 /* ---- Living tab dashboard: allowances vs what the pots actually spend ---- */
 function livingDashboard(){
   const allow=state.bills.filter(b=>b.active!==false&&b.kind==='living');
-  const la=ENGINE.livingAllowanceMonthly(),act3=ENGINE.livingActualMonthly();
+  const ls=ENGINE.livingSummary(),la=ENGINE.livingAllowanceMonthly(),act3=ENGINE.livingActualMonthly();
   const billCats=new Set(Object.keys(ENGINE.billBackedCats()));
   const since=monthKey(addMonths(todayISO(),-3)),upto=monthKey(addMonths(todayISO(),-1));
   const isLiving=tx=>{const c=byId(state.categories,tx.categoryId);return tx.amount<0&&!(c&&(c.group==='Income'||c.group==='Transfers'||billCats.has(tx.categoryId)))};
   const inWin=tx=>{const mk=monthKey(tx.date);return mk>=since&&mk<=upto};
-  const p=la?act3/la:0;
-  let h=`<div class="grid g4" style="margin-bottom:14px">
-    ${statCard('Allowances',fmt(la)+'/mo','',fmt(Math.round(la*12/52))+'/wk moved to pots')}
-    ${statCard('Actually spent',fmt(act3)+'/mo',p>1.05?'neg':'pos','3-month average on the pots')}
-    ${statCard(p>1?'Over allowance':'Under allowance',la?fmtS(la-act3)+'/mo':'\u2014',p>1?'neg':'pos',la?Math.round(p*100)+'% of allowance used':'add an allowance to start')}
-    ${statCard('Living spend in Pay Split',fmt(Math.round(ENGINE.paySplit().spend))+'/mo','',ENGINE.paySplit().spendSrc==='allowances'?'taken from these allowances':'mode: '+ENGINE.paySplit().spendSrc+' - set to Living allowances')}
-  </div>`;
-  if(!allow.length&&!ENGINE.livingPotIds().length)return h+`<div class="card" style="margin-bottom:14px"><p class="dim" style="font-size:12.5px;line-height:1.7">Nothing here yet. A living allowance is regular money you move to a spending pot - the Revolut top-up, grocery money, cash for haircuts. It sits inside the weekly transfer because you move it, but Pay Split treats it as living spend rather than a commitment. Add one, or edit an existing bill and tick "Living allowance" to move it across.</p></div>`;
-  // pots: one row each in a single card (a grid of tall cards went ragged
-  // as soon as there were three or four)
   const pots=ENGINE.livingPotIds();
-  h+=`<div class="card" style="margin-bottom:14px"><h3>Pots <span class="r" style="display:inline-flex;gap:8px;align-items:center"><span class="dim" style="font-family:var(--mono);font-size:11px">${pots.length} ACCOUNT${pots.length===1?'':'S'} &middot; SPENT = 3 MONTH AVERAGE</span><button class="btn sm" data-action="living-suggest" title="Propose allowances from what the pots actually spend - review, edit, then create the ones you want">&#10022; Suggest allowances</button></span></h3>
-    <table class="compact"><thead><tr><th>Account</th><th class="r">Balance</th><th class="r">Allowance /mo</th><th class="r">Spent /mo</th><th class="r">Headroom</th><th style="width:18%"></th><th>Top spend</th></tr></thead><tbody>`;
-  let potAl=0,potSp=0;
+  let h='';
+  if(!allow.length&&!pots.length)return `<div class="card" style="margin-bottom:14px"><p class="dim" style="font-size:12.5px;line-height:1.7">Nothing here yet. Pick the spends account in the hero above, then use Suggest allowances on the Pots card - or edit a bill (Revolut, groceries, haircuts) and tick "Living allowance" to move it across.</p></div>`;
+  h+='<div class="grid g2" style="margin-bottom:14px"><div class="grid" style="gap:14px;align-content:start">';
+  const proj=ENGINE.livingProjection(12);
+  h+=`<div class="card"><h3>Spends Account Health <span class="r dim" style="font-family:var(--mono);font-size:11px">12 WEEK PROJECTION</span></h3>`;
+  if(!pots.length)h+=`<p class="dim" style="font-size:12.5px;line-height:1.6">Pick the spends account in the hero to project its balance: living transfer of ${fmt(ls.final)} in each week, average spend out.</p>`;
+  else{
+    h+=chart('living-proj',el=>CH.line(el,{labels:proj.rows.map(r=>'W'+r.week),series:[{name:'Projected balance',color:proj.net<0?CONFIG.colors.rd:CONFIG.colors.gn,data:proj.rows.map(r=>r.bal)}],fillFirst:true,height:180}));
+    h+=`<div style="margin-top:10px;font-size:12.5px;font-family:var(--mono);color:${proj.net<0?'var(--rd)':'var(--gn)'}">${proj.net<0?'&#9888;':'&#10003;'} ${fmt(proj.inWk)} in &middot; ${fmt(proj.outWk)} out per week (3-month average) &middot; net ${fmtS(proj.net)}/wk${proj.shortfalls.length?` &middot; pots empty by week ${proj.shortfalls[0].week}`:''} &middot; opening ${fmt(proj.opening)}.</div>`;
+  }
+  h+='</div>';
+  const byCat={};for(const b of allow){const k=b.categoryId?catShort(b.categoryId):'Uncategorised';byCat[k]=(byCat[k]||0)+ENGINE.billAnnual(b)}
+  const items=Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([nm,v],i)=>({name:nm,value:Math.round(v),color:CONFIG.series[i%CONFIG.series.length]}));
+  const per=ui.billCatPeriod||'annual';
+  const perCfg={weekly:['PER WEEK',52,'Weekly'],monthly:['PER MONTH',12,'Monthly'],quarterly:['PER QUARTER',4,'Quarterly'],annual:['PER YEAR',1,'Annual']};
+  const [perLabel,perDiv,perTitle]=perCfg[per]||perCfg.annual;
+  h+=`<div class="card"><h3>${perTitle} Living Cost by Category <span class="r pill-row" style="gap:4px">${Object.entries(perCfg).map(([k,v])=>`<button class="btn sm ${per===k?'primary':''}" data-action="bill-cat-period" data-p="${k}" style="padding:2px 8px;font-size:10px">${v[2]}</button>`).join('')}</span></h3>${items.length?chart('living-donut',el=>CH.donut(el,{items:items.map(x=>({...x,value:Math.round(x.value/perDiv)})),centerLabel:perLabel,centerValue:fmt0(ls.annual/perDiv)})):'<p class="dim" style="font-size:12.5px">No allowances yet.</p>'}</div>`;
+  h+='</div>';
+  h+=`<div class="card" style="display:flex;flex-direction:column;min-height:0"><h3>Pots <span class="r" style="display:inline-flex;gap:8px;align-items:center"><span class="dim" style="font-family:var(--mono);font-size:11px">SPENT = 3 MONTH AVERAGE</span><button class="btn sm" data-action="living-suggest" title="Propose allowances from what the pots actually spend - review, edit, then create the ones you want">&#10022; Suggest allowances</button></span></h3>
+    <div class="grid g3" style="margin-bottom:10px">${statCard('Allowances',fmt(la)+'/mo','',fmt(Math.round(ls.final))+'/wk transfer')}${statCard('Actually spent',fmt(act3)+'/mo',act3>la*1.05?'neg':'pos','')}${statCard(act3>la?'Over':'Headroom',la?fmtS(la-act3)+'/mo':'\u2014',act3>la?'neg':'pos',la?Math.round(act3/la*100)+'% used':'')}</div>
+    <div style="flex:1;overflow:auto;min-height:0"><table class="compact"><thead><tr><th>Account</th><th class="r">Balance</th><th class="r">Allow /mo</th><th class="r">Spent /mo</th><th class="r">Headroom</th><th>Top spend</th></tr></thead><tbody>`;
   for(const pid of pots){
     const a=byId(state.accounts,pid);if(!a)continue;
     const mine=allow.filter(b=>b.toAccountId===pid);
     const alMo=Math.round(sum(mine.map(ENGINE.billWeekly))*52/12);
     const txs=state.transactions.filter(t=>t.accountId===pid&&inWin(t)&&isLiving(t));
     const spentMo=Math.round(sum(txs.map(t=>-t.amount))/3);
-    potAl+=alMo;potSp+=spentMo;
-    const byCat={};for(const t of txs){const k=t.categoryId?catShort(t.categoryId):'Uncategorised';byCat[k]=(byCat[k]||0)-t.amount}
-    const top=Object.entries(byCat).sort((x,y)=>y[1]-x[1]).slice(0,3);
-    const pp=alMo?spentMo/alMo:(spentMo?1.01:0),head=alMo-spentMo;
-    h+=`<tr><td>${esc(a.name)}<div class="dim" style="font-size:10.5px">${mine.length?mine.map(b=>esc(b.name)+' '+fmt(b.amount)+' '+billFreqLabel(b).toLowerCase()).join(' &middot; '):'no allowance lands here'}</div></td>
-      <td class="r num">${fmt(a.balance)}</td><td class="r num">${alMo?fmt(alMo):'<span class="dim">\u2014</span>'}</td><td class="r num" style="color:${pp>1.05?'var(--rd)':'var(--tx)'}">${fmt(spentMo)}</td>
-      <td class="r num" style="color:${head>=0?'var(--gn)':'var(--rd)'}">${alMo?fmtS(head):'<span class="dim">no allowance</span>'}</td>
-      <td><div class="pbar"><div class="${pp>1?'over':pp>0.85?'warn':''}" style="width:${clamp(pp*100,0,100)}%"></div></div></td>
-      <td class="dim num" style="font-size:11px">${top.length?top.map(([k,v])=>`${esc(k)} ${fmt0(v/3)}`).join(' &middot; '):'\u2014'}</td></tr>`;
+    const byC={};for(const t of txs){const k=t.categoryId?catShort(t.categoryId):'Uncategorised';byC[k]=(byC[k]||0)-t.amount}
+    const top=Object.entries(byC).sort((x,y)=>y[1]-x[1]).slice(0,3);
+    const head=alMo-spentMo;
+    h+=`<tr><td>${esc(a.name)}<div class="dim" style="font-size:10.5px">${mine.length} allowance${mine.length===1?'':'s'}</div></td><td class="r num">${fmt(a.balance)}</td><td class="r num">${alMo?fmt(alMo):'<span class="dim">\u2014</span>'}</td><td class="r num">${fmt(spentMo)}</td><td class="r num" style="color:${head>=0?'var(--gn)':'var(--rd)'}">${alMo?fmtS(head):'<span class="dim">no allowance</span>'}</td><td class="dim num" style="font-size:11px">${top.length?top.map(([k,v])=>`${esc(k)} ${fmt0(v/3)}`).join(' &middot; '):'\u2014'}</td></tr>`;
   }
-  h+=`<tr class="tot"><td>Total</td><td></td><td class="r num">${fmt(potAl)}</td><td class="r num">${fmt(potSp)}</td><td class="r num" style="color:${potAl-potSp>=0?'var(--gn)':'var(--rd)'}">${fmtS(potAl-potSp)}</td><td><div class="pbar"><div class="${potSp>potAl?'over':''}" style="width:${clamp(potAl?potSp/potAl*100:0,0,100)}%"></div></div></td><td></td></tr></tbody></table></div>`;
+  h+='</tbody></table></div></div></div>';
   h+=livingBudgetCard(billCats);
   const noPot=allow.filter(b=>!b.toAccountId);
-  if(noPot.length)h+=`<div class="card" style="margin-top:14px"><h3>Not tracked</h3><p class="dim" style="font-size:12.5px;line-height:1.6">${noPot.map(b=>esc(b.name)).join(', ')} ${noPot.length>1?'have':'has'} no "lands in account" set, so actual spend cannot be compared. Edit and pick the pot it goes to.</p></div>`;
+  if(noPot.length)h+=`<div class="card" style="margin-bottom:14px"><h3>Not tracked</h3><p class="dim" style="font-size:12.5px;line-height:1.6">${noPot.map(b=>esc(b.name)).join(', ')} ${noPot.length>1?'have':'has'} no "lands in account" set, so actual spend cannot be compared. Edit and pick the pot it goes to.</p></div>`;
   return h;
 }
 /* ---- suggest allowances ----
@@ -2050,8 +2064,8 @@ function livingSpendProfile(){
     for(const t of state.transactions){
       if(t.accountId!==pid||t.amount>=0)continue;const mk=monthKey(t.date);if(mk<since||mk>upto)continue;
       const c=byId(state.categories,t.categoryId);if(c&&(c.group==='Income'||c.group==='Transfers'||billCats.has(t.categoryId)))continue;
-      const k=c?c.group+' > '+c.name:'Uncategorised';const o=cats[k]=cats[k]||{total:0,count:0,max:0,months:new Set()};
-      o.total+=-t.amount;o.count++;o.max=Math.max(o.max,-t.amount);o.months.add(mk);
+      const k=c?c.group+' > '+c.name:'Uncategorised';const o=cats[k]=cats[k]||{total:0,count:0,max:0,months:new Set(),txIds:[]};
+      o.total+=-t.amount;o.count++;o.max=Math.max(o.max,-t.amount);o.months.add(mk);o.txIds.push(t.id);
     }
     out.push({accountId:pid,account:a.name,categories:Object.entries(cats).map(([k,o])=>({category:k,perMonth:Math.round(o.total/3),perWeek:Math.round(o.total/3*12/52),count:o.count,largest:o.max,monthsSeen:o.months.size})).sort((x,y)=>y.perMonth-x.perMonth)});
   }
@@ -2088,7 +2102,9 @@ ${JSON.stringify(profile)}`;
 }
 function livingSuggestModal(res,source){
   const opts=id=>activeAccounts().filter(a=>acctType(a).asset&&!a.noTx).sort(acctCmp).map(a=>`<option value="${a.id}" ${a.id===id?'selected':''}>${esc(a.name)}</option>`).join('');
-  const rows=res.allowances.map((x,i)=>`<tr style="${x.oneOff?'opacity:.7':''}"><td><input type="checkbox" name="use${i}" ${x.oneOff?'':'checked'}></td><td><input name="name${i}" value="${esc(x.name)}" style="width:100%"><div class="dim" style="font-size:10.5px;margin-top:2px">${x.categoryId?esc(catShort(x.categoryId)):esc((x.categories||[]).join(', '))}${x.oneOff?' <span class="badge am">ONE-OFF?</span>':''}</div></td><td><input name="weekly${i}" value="${(x.weekly/100).toFixed(2)}" inputmode="decimal" style="width:90px;text-align:right"></td><td><select name="acct${i}">${opts(x.accountId)}</select></td><td class="dim" style="font-size:11.5px;line-height:1.4">${esc(x.note)}</td></tr>`).join('');
+  const txFor=x=>{if(!x.categoryId)return[];const lo=monthKey(addMonths(todayISO(),-3)),hi=monthKey(addMonths(todayISO(),-1));return state.transactions.filter(t=>t.categoryId===x.categoryId&&t.amount<0&&ENGINE.livingPotIds().includes(t.accountId)&&monthKey(t.date)>=lo&&monthKey(t.date)<=hi).sort((a,b)=>a.date<b.date?1:-1)};
+  const rows=res.allowances.map((x,i)=>{const txs=txFor(x);x._txIds=txs.map(t=>t.id);return`<tr style="${x.oneOff?'opacity:.7':''}"><td><input type="checkbox" name="use${i}" ${x.oneOff?'':'checked'}></td><td><input name="name${i}" value="${esc(x.name)}" style="width:100%"><div class="dim" style="font-size:10.5px;margin-top:2px">${x.categoryId?esc(catShort(x.categoryId)):esc((x.categories||[]).join(', '))}${x.oneOff?' <span class="badge am">ONE-OFF?</span>':''}${txs.length?` &middot; <span class="linkish" data-action="suggest-expand" data-i="${i}">${txs.length} transaction${txs.length===1?'':'s'} &#9662;</span>`:''}</div></td><td><input name="weekly${i}" value="${(x.weekly/100).toFixed(2)}" inputmode="decimal" style="width:90px;text-align:right"></td><td><select name="acct${i}">${opts(x.accountId)}</select></td><td class="dim" style="font-size:11.5px;line-height:1.4">${esc(x.note)}</td></tr>
+    <tr id="sug-tx-${i}" style="display:none"><td></td><td colspan="4" style="padding:0 8px 8px"><table class="compact" style="background:#111;border-radius:6px"><tbody>${txs.map(t=>`<tr><td style="width:24px"><input type="checkbox" data-change="suggest-tx" data-i="${i}" data-id="${t.id}" checked></td><td class="mut num" style="width:90px">${fmtD(t.date)}</td><td>${esc(t.payee)}</td><td class="mut" style="width:120px">${esc(acctName(t.accountId))}</td><td class="r num" style="width:90px">${fmt(-t.amount)}</td></tr>`).join('')}<tr class="tot"><td></td><td colspan="3" class="dim" style="font-size:11px">Untick anything that is not part of the weekly pattern - the weekly figure above recalculates from what is ticked</td><td class="r num" id="sug-sum-${i}">${fmt(sum(txs.map(t=>-t.amount)))}</td></tr></tbody></table></td></tr>`}).join('');
   const body=`<p class="dim" style="font-size:12.5px;line-height:1.6;margin-bottom:10px">${source==='ai'?'Claude read the last 3 months on your pots and listed one allowance per category.':'One allowance per category from the last 3 months on your pots (add an API key for a smarter read).'} Rows marked ONE-OFF? start unticked. Untick anything you do not want, change names or amounts, then create. They arrive as weekly living allowances in the transfer${state.settings.spendMode!=='allowance'?' and Pay Split switches to "Living allowances" for living spend':''}.</p>
     <table class="compact"><thead><tr><th></th><th>Allowance</th><th class="r">Weekly $</th><th>Lands in</th><th>Why</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="dim" style="padding:14px">Nothing to propose - the pots have no categorised spend in the last 3 months.</td></tr>'}</tbody></table>
     ${res.oneOffs&&res.oneOffs.length?`<div class="sec-label" style="margin:14px 0 6px">Set aside as one-offs (not turned into allowances)</div><table class="compact"><tbody>${res.oneOffs.map(o=>`<tr><td>${esc(o.category)}</td><td class="mut">${esc(o.account)}</td><td class="r num">${fmt(o.amount)}</td><td class="dim" style="font-size:11.5px">${esc(o.reason)}</td></tr>`).join('')}</tbody></table>`:''}`;
@@ -3250,6 +3266,7 @@ const ACTIONS={
     }catch(e){toast('Could not build suggestions - '+(e.message||e));livingSuggestModal({allowances:livingSuggestFallback(profile),oneOffs:[]},'avg')}
     el.disabled=false;el.innerHTML='&#10022; Suggest allowances';
   },
+  'suggest-expand':el=>{const r=$('#sug-tx-'+el.dataset.i);if(r)r.style.display=r.style.display==='none'?'':'none'},
   'living-suggest-create':()=>{
     const res=ui._suggest;if(!res)return;const v=modalFormValues();
     const tr=(state.categories.find(c=>c.group==='Transfers')||{}).id||'';let made=0;
@@ -3717,6 +3734,15 @@ const CHANGES={
   'bills-buffer':el=>{state.settings.billsBuffer=clamp(parseFloat(el.value)||0,0,50);save();render()},
   'bills-round':el=>{state.settings.billsRound=+el.value;save();render()},
   'spends-account':el=>{state.settings.spendsAccountId=el.value;save();render()},
+  'suggest-tx':el=>{
+    const i=el.dataset.i;const boxes=[...document.querySelectorAll(`#sug-tx-${i} input[data-change="suggest-tx"]`)];
+    const ids=boxes.filter(b=>b.checked).map(b=>b.dataset.id);
+    const total=sum(ids.map(id=>-(byId(state.transactions,id)||{amount:0}).amount));
+    const weekly=Math.ceil(total/3*12/52/500)*500;
+    const w=$(`#modal-layer [name=weekly${i}]`);if(w)w.value=(weekly/100).toFixed(2);
+    const t=$('#sug-sum-'+i);if(t)t.textContent=fmt(total);
+    if(ui._suggest&&ui._suggest.allowances[i])ui._suggest.allowances[i]._txIds=ids;
+  },
   'living-round':el=>{state.settings.livingRound=parseInt(el.value)||0;save();render()},
   'bills-account':el=>{state.settings.billsAccountId=el.value;state.settings.billsAccountIds=el.value?[el.value]:[];save();render()},
   'bills-account-multi':el=>{const s=new Set(billsAccountIds());if(el.checked)s.add(el.dataset.id);else s.delete(el.dataset.id);state.settings.billsAccountIds=[...s];state.settings.billsAccountId=[...s][0]||'';ui.billsPickOpen=true;save();render()},
