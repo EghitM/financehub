@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-17.11';
+const BUILD='2026-09-17.12';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -2406,22 +2406,23 @@ function livingGapList(){
 }
 function billForm(b={}){
   return`${b.autoFrom?`<p style="font-size:12.5px;margin-bottom:12px;color:var(--am)">&#9888; Managed by the debt "${esc((byId(state.debts,b.autoFrom)||{}).name||'')}" - change the amount or frequency on the debt itself, or untick "Fund this repayment from the weekly bills transfer" there. Edits to those fields here are overwritten.</p>`:''}<div class="frow">
-    <label class="f"><span class="fl">Bill name</span><input name="name" value="${esc(b.name||'')}" required></label>
+    <label class="f"><span class="fl">${b.kind==='living'?'Allowance name':'Bill name'}</span><input name="name" value="${esc(b.name||'')}" required></label>
     <label class="f"><span class="fl">Category</span><select name="categoryId">${catOptions(b.categoryId)}</select></label>
   </div>
-  <div class="frow">
+  <div class="frow bill-only" style="${b.kind==='living'?'display:none':''}">
     <label class="f"><span class="fl">Transaction match keyword</span><input name="matchKeyword" value="${esc(b.matchKeyword||'')}" placeholder="e.g. SYNERGY - links actual payments to this bill"></label>
     <label class="f" style="align-self:end"><span class="chk"><input type="checkbox" name="autoAdvance" ${b.autoAdvance!==false?'checked':''}> Auto-advance due date when a matching payment appears</span></label>
   </div>
-  <label class="chk" style="margin-bottom:10px"><input type="checkbox" name="inTransfer" ${b.inTransfer!==false?'checked':''}> Include in weekly transfer (this bill is paid FROM the bills account)</label>
+  <label class="chk bill-only" style="margin-bottom:10px;${b.kind==='living'?'display:none':''}"><input type="checkbox" name="inTransfer" ${b.inTransfer!==false?'checked':''}> Include in weekly transfer (this bill is paid FROM the bills account)</label>
   <div class="frow" style="align-items:end;margin-bottom:10px">
     <label class="chk" style="flex:1"><input type="checkbox" name="living" ${b.kind==='living'?'checked':''} data-change="bill-living-toggle"> Living allowance - spending money moved to a pot (Revolut, groceries), not a commitment. Shows on the Living tab; Pay Split counts it as living spend, not as a bill.</label>
     <label class="f" id="living-acct-wrap" style="${b.kind==='living'?'':'display:none'};min-width:200px"><span class="fl">Lands in account (to track actual spend)</span><select name="toAccountId">${acctOptions(b.toAccountId||'')}</select></label>
   </div>
-  <div class="frow" style="margin-bottom:6px">
+  <p class="dim living-only" style="font-size:12px;line-height:1.6;margin:-4px 0 10px;${b.kind==='living'?'':'display:none'}">Spend is tracked by <b>category</b>, not by shop: every transaction on the pot accounts in this category counts against the allowance, whether it is Woolworths, Coles or IGA. The amount is what you move to the pot each period.</p>
+  <div class="frow bill-only" style="margin-bottom:6px;${b.kind==='living'?'display:none':''}">
     <label class="f"><span class="fl">Funds debt repayment of</span><select name="debtId">${debtOptions(b.debtId,'- none, ordinary bill -')}</select></label>
   </div>
-  <p class="dim" style="font-size:12px;margin-top:-2px;margin-bottom:10px">For loan repayments: if the money routes THROUGH the bills account, keep the transfer box ticked AND link the debt here - Pay Split then counts it once (in the bills line, not the minimums line). If it debits another account entirely, untick the transfer box instead.</p>
+  <p class="dim bill-only" style="font-size:12px;margin-top:-2px;margin-bottom:10px;${b.kind==='living'?'display:none':''}">For loan repayments: if the money routes THROUGH the bills account, keep the transfer box ticked AND link the debt here - Pay Split then counts it once (in the bills line, not the minimums line). If it debits another account entirely, untick the transfer box instead.</p>
   <div class="frow3">
     <label class="f"><span class="fl">Amount $</span><input name="amount" value="${b.amount!=null?(b.amount/100).toFixed(2):''}" inputmode="decimal" required></label>
     <label class="f"><span class="fl">Frequency</span><select name="freq" data-change="bill-freq-toggle">${CONFIG.billFreqs.map(f=>`<option value="${f.id}" ${b.freq===f.id?'selected':''}>${f.n}</option>`).join('')}</select></label>
@@ -2431,14 +2432,14 @@ function billForm(b={}){
     <label class="f"><span class="fl">Instalments - one per line: date, amount (add "paid" to tick one off)</span><textarea name="scheduleText" rows="5" style="font-family:var(--mono);font-size:12.5px" placeholder="15/09/2026 49.26 paid&#10;17/11/2026 619.66&#10;19/01/2027 619.66&#10;23/03/2027 619.66">${esc((b.schedule||[]).map(i=>fmtD(i.date)+' '+(i.amount/100).toFixed(2)+(i.paid?' paid':'')).join('\n'))}</textarea></label>
     <p class="dim" style="font-size:11.5px;line-height:1.6;margin-top:-4px">Amount and Next due below are filled from the next unpaid instalment. Weekly set-aside = total of the schedule &divide; 52, so a notice covering one year is spread evenly. Matched payments tick instalments off in order; when the last one is paid the bill shows complete until you paste next year's notice.</p>
   </div>
-  <div class="frow3">
+  <div class="frow3 bill-only" style="${b.kind==='living'?'display:none':''}">
     <label class="f"><span class="fl">Next due date</span><input type="date" name="nextDue" value="${b.nextDue||todayISO()}">${(lp=>lp?`<span class="dim num" style="font-size:11px;margin-top:3px">last paid ${fmtD(lp.date)} (${fmt(lp.total)}) &middot; auto-advance sets next due to last paid + 1 cycle</span>`:'')(b.id?ENGINE.billLastPaid(b):null)}</label>
     <label class="f"><span class="fl">Paid from account</span><select name="accountId">${acctOptions(b.accountId)}</select></label>
     <label class="f"><span class="fl">Payment method</span><select name="method">${['Direct debit','BPAY','Manual'].map(m=>`<option ${b.method===m?'selected':''}>${m}</option>`).join('')}</select></label>
   </div>
   <div class="frow">
     <label class="f"><span class="fl">Notes</span><input name="notes" value="${esc(b.notes||'')}"></label>
-    <label class="f" style="align-self:end"><span class="chk"><input type="checkbox" name="active" ${b.active!==false?'checked':''}> Active (counted in weekly transfer)</span></label>
+    <label class="f" style="align-self:end"><span class="chk"><input type="checkbox" name="active" ${b.active!==false?'checked':''}> Active${b.kind==='living'?'':' (counted in weekly transfer)'}</span></label>
   </div>`;
 }
 
@@ -3324,6 +3325,7 @@ const ACTIONS={
     const v=modalFormValues();
     if(!v.name.trim())return toast('Bill name is required');
     const rec={name:v.name.trim(),categoryId:v.categoryId,amount:cents(v.amount),freq:v.freq,everyN:Math.max(1,parseInt(v.everyN)||1),nextDue:v.nextDue,accountId:v.accountId,method:v.method,notes:v.notes.trim(),matchKeyword:(v.matchKeyword||'').trim(),autoAdvance:!!v.autoAdvance,inTransfer:!!v.inTransfer,kind:v.living?'living':'bill',toAccountId:v.living?(v.toAccountId||''):'',debtId:v.debtId||'',active:!!v.active};
+    if(rec.kind==='living'){rec.matchKeyword='';rec.autoAdvance=false;rec.inTransfer=true;rec.debtId='';rec.method='Transfer';rec.accountId=state.settings.spendsAccountId||'';if(!rec.nextDue)rec.nextDue=todayISO()}
     if(rec.freq==='schedule'){
       const prev=ui.editing?((byId(state.bills,ui.editing)||{}).schedule||[]):[];
       const lines=String(v.scheduleText||'').split('\n').map(l=>l.trim()).filter(Boolean);
@@ -3773,7 +3775,7 @@ const CHANGES={
   'bills-account':el=>{state.settings.billsAccountId=el.value;state.settings.billsAccountIds=el.value?[el.value]:[];save();render()},
   'bills-account-multi':el=>{const s=new Set(billsAccountIds());if(el.checked)s.add(el.dataset.id);else s.delete(el.dataset.id);state.settings.billsAccountIds=[...s];state.settings.billsAccountId=[...s][0]||'';ui.billsPickOpen=true;save();render()},
   'living-account':el=>{const s=new Set(state.settings.livingAccountIds||[]);if(el.checked)s.add(el.dataset.id);else s.delete(el.dataset.id);state.settings.livingAccountIds=[...s];ui.livingPickOpen=true;save();render()},
-  'bill-living-toggle':el=>{const w=$('#living-acct-wrap');if(w)w.style.display=el.checked?'':'none'},
+  'bill-living-toggle':el=>{const w=$('#living-acct-wrap');if(w)w.style.display=el.checked?'':'none';document.querySelectorAll('#modal-layer .bill-only').forEach(x=>x.style.display=el.checked?'none':'');document.querySelectorAll('#modal-layer .living-only').forEach(x=>x.style.display=el.checked?'':'none')},
   'bill-freq-toggle':el=>{const w=$('#everyN-wrap');if(w)w.style.display=el.value==='customN'?'':'none';const s=$('#schedule-wrap');if(s)s.style.display=el.value==='schedule'?'':'none'},
   'budget-mode':el=>{ui.budgetMode=el.value;render()},
   'budget-smooth':el=>{ui.budgetSmooth=el.checked;render()},
