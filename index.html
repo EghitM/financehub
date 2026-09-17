@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-17.8';
+const BUILD='2026-09-17.9';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -558,19 +558,18 @@ const ENGINE={
     // only bills paid FROM the bills account participate in the transfer.
     // Bills flagged out (mortgage/debt repayments paid from everyday, already
     // costed as debt minimums) stay in the register without inflating it.
-    const act=state.bills.filter(b=>b.active!==false&&b.inTransfer!==false);
-    const excluded=state.bills.filter(b=>b.active!==false&&b.inTransfer===false).length;
+    // two transfers: BILLS (commitments, into the bills account) and LIVING
+    // (allowances, into the spends account). This summary is the bills one;
+    // livingSummary() is its mirror.
+    const act=state.bills.filter(b=>b.active!==false&&b.inTransfer!==false&&b.kind!=='living');
+    const excluded=state.bills.filter(b=>b.active!==false&&b.inTransfer===false&&b.kind!=='living').length;
     const wk=sum(act.map(ENGINE.billWeekly));
-    // living allowances (kind='living') are money you move too, so they sit
-    // inside the transfer - but they are spending envelopes, not commitments,
-    // so Pay Split treats them as the living-spend line, not the bills line
-    const livingWk=sum(act.filter(b=>b.kind==='living').map(ENGINE.billWeekly));
-    const billsWk=wk-livingWk;
+    const livingWk=ENGINE.livingSummary().weekly;
     const buf=wk*(state.settings.billsBuffer||0)/100;
     let final=wk+buf;
     const r=state.settings.billsRound*100;
     if(r>0)final=Math.ceil(final/r)*r;
-    return {weekly:wk,billsWeekly:billsWk,livingWeekly:livingWk,buffer:buf,final,fortnightly:final*2,monthly:final*52/12,annual:wk*52,count:act.length,livingCount:act.filter(b=>b.kind==='living').length,excluded};
+    return {weekly:wk,billsWeekly:wk,livingWeekly:livingWk,buffer:buf,final,fortnightly:final*2,monthly:final*52/12,annual:wk*52,count:act.length,excluded};
   },
   /* Bills account: project 12 weeks -> weekly transfer in, bills out on due dates.
      Also computes min opening float needed so a zero-start never dips negative. */
@@ -579,7 +578,7 @@ const ENGINE={
     const opening=sum(billsAccountIds().map(id=>(byId(state.accounts,id)||{balance:0}).balance));
     const start=todayISO();
     const events=[]; // due bills in horizon
-    for(const b of state.bills.filter(b=>b.active!==false&&b.inTransfer!==false)){
+    for(const b of state.bills.filter(b=>b.active!==false&&b.inTransfer!==false&&b.kind!=='living')){
       if(b.freq==='schedule'){
         for(const i of (b.schedule||[]))if(!i.paid){const d=daysBetween(start,i.date);if(d>=0&&d<weeks*7)events.push({day:d,name:b.name,amount:i.amount})}
         continue;
@@ -735,8 +734,16 @@ const ENGINE={
   },
   billBackedCats(){
     const m={};
-    for(const b of state.bills.filter(b=>b.active!==false)){
+    for(const b of state.bills.filter(b=>b.active!==false&&b.kind!=='living')){
       if(b.categoryId)m[b.categoryId]=(m[b.categoryId]||0)+ENGINE.billMonthly(b);
+    }
+    return m;
+  },
+  allowanceCats(){
+    const m={};
+    for(const b of state.bills.filter(b=>b.active!==false&&b.kind==='living')){
+      const c=byId(state.categories,b.categoryId);
+      if(b.categoryId&&c&&c.group!=='Transfers')m[b.categoryId]=(m[b.categoryId]||0)+ENGINE.billMonthly(b);
     }
     return m;
   },
@@ -837,11 +844,20 @@ const ENGINE={
   billsMonthly(){return Math.round(ENGINE.billsSummary().final*52/12)},
   /* Pay Split's bills line: commitments only - the living allowances inside
      the transfer are reported on the living-spend line instead */
-  billsCommitMonthly(){const s=ENGINE.billsSummary();return Math.round(s.final*(s.weekly?s.billsWeekly/s.weekly:1)*52/12)},
+  billsCommitMonthly(){return Math.round(ENGINE.billsSummary().final*52/12)},
+  /* the living transfer: every active allowance normalised to a week, into
+     the spends account (settings.spendsAccountId) */
+  livingSummary(){
+    const act=state.bills.filter(b=>b.active!==false&&b.kind==='living');
+    const wk=sum(act.map(ENGINE.billWeekly));
+    const r=state.settings.livingRound*100;
+    let final=wk;if(r>0)final=Math.ceil(final/r)*r;
+    return{weekly:wk,final,fortnightly:final*2,monthly:final*52/12,annual:wk*52,count:act.length,accountId:state.settings.spendsAccountId||''};
+  },
   livingAllowanceMonthly(){return Math.round(sum(state.bills.filter(b=>b.active!==false&&b.kind==='living').map(ENGINE.billWeekly))*52/12)},
   /* actual living spend on the accounts the allowances land in (3-mo avg):
      everything that is not a transfer, income or a bill-backed category */
-  livingPotIds(){return [...new Set([...(state.settings.livingAccountIds||[]),...state.bills.filter(b=>b.active!==false&&b.kind==='living'&&b.toAccountId).map(b=>b.toAccountId)])]},
+  livingPotIds(){return [...new Set([state.settings.spendsAccountId||'',...(state.settings.livingAccountIds||[]),...state.bills.filter(b=>b.active!==false&&b.kind==='living'&&b.toAccountId).map(b=>b.toAccountId)].filter(id=>id&&byId(state.accounts,id)))]},
   livingActualMonthly(){
     const acctIds=new Set(ENGINE.livingPotIds());
     const billCats=new Set(Object.keys(ENGINE.billBackedCats()));
@@ -2042,32 +2058,38 @@ function livingSpendProfile(){
   return out;
 }
 function livingSuggestFallback(profile){
-  return profile.filter(p=>p.categories.length).map(p=>{
-    const wk=sum(p.categories.map(c=>c.perWeek));
-    return{name:p.account+' spending',accountId:p.accountId,weekly:Math.ceil(wk/1000)*1000,categories:p.categories.map(c=>c.category.split(' > ').pop()),note:'Average of the last 3 months across every category on this account, rounded up to $10',oneOff:false};
-  });
+  // one allowance per category, the way bills are listed one per bill
+  const out=[];
+  for(const p of profile)for(const c of p.categories){
+    if(c.category==='Uncategorised')continue;
+    const name=c.category.split(' > ').pop();
+    const oneOff=c.monthsSeen<=1||(c.count<=2&&c.largest>c.perMonth*3*0.6);
+    const cat=state.categories.find(x=>x.group+' > '+x.name===c.category);
+    out.push({name,categoryId:cat?cat.id:'',accountId:state.settings.spendsAccountId||p.accountId,weekly:Math.ceil(c.perWeek/500)*500,categories:[name],note:oneOff?`Seen in ${c.monthsSeen} of 3 months${c.count<=2?', '+c.count+' transaction'+(c.count===1?'':'s'):''} - looks like a one-off`:`${fmt(c.perMonth)}/mo average over 3 months on ${p.account}, ${c.count} transactions`,oneOff});
+  }
+  // merge duplicates across pots (same category on two accounts)
+  const byName={};for(const o of out){if(byName[o.name]){byName[o.name].weekly+=o.weekly;byName[o.name].note+='; also on another pot'}else byName[o.name]=o}
+  return Object.values(byName).sort((a,b)=>b.weekly-a.weekly);
 }
 async function livingSuggestAI(profile){
   const accounts=profile.map(p=>p.account);
   const prompt=`You are helping an Australian household set weekly spending allowances ("pots"). Below is what each spending account actually spent per category over the last 3 months (amounts in cents; perWeek already normalised), with transaction counts, the largest single transaction, and how many of the 3 months the category appeared in.
 
-Propose a SHORT list of allowances (usually 1 to 3 per account): group related everyday categories into one allowance where that is how people budget (groceries + household, dining + coffee + takeaway, fuel + parking), keep medical or clothing separate if they are sizeable, and set each weekly amount from the average, rounded to a sensible figure. Set aside anything that looks like a one-off (a category seen in only one month, or dominated by one large transaction such as a car service or a big purchase) - do not fold one-offs into an allowance; list them separately with a reason. Uncategorised spend: include a note but do not create an allowance for it.
+Propose ONE allowance PER CATEGORY, listed the way a bills register lists one line per bill: name = the category name, weekly amount from the 3-month average rounded up to the nearest $5, and a one-sentence note. Mark a category oneOff:true when it looks like a one-off rather than a living pattern (seen in only one of the three months, or dominated by a single large transaction such as a car service or a big purchase) - still list it, with the reason, so the user can decide. Merge the same category appearing on two accounts into one line. Skip Uncategorised.
 
-Output ONLY JSON, no fences: {"allowances":[{"name":"...","account":"<one of ${JSON.stringify(accounts)}>","weekly":<dollars number>,"categories":["Supermarket","..."],"note":"one sentence why"}],"oneOffs":[{"category":"...","account":"...","amount":<dollars>,"reason":"..."}]}
+Output ONLY JSON, no fences: {"allowances":[{"name":"<category name>","category":"<Group > Category exactly as given>","weekly":<dollars number>,"note":"...","oneOff":false}]}
 
 ${JSON.stringify(profile)}`;
   const raw=await aiCall([{role:'user',content:prompt}],1400);
   const clean=raw.replace(/```json|```/g,'').trim();
   const j=JSON.parse(clean.slice(clean.indexOf('{'),clean.lastIndexOf('}')+1));
-  const byName=Object.fromEntries(profile.map(p=>[p.account.toLowerCase(),p.accountId]));
-  const allowances=(j.allowances||[]).map(x=>({name:String(x.name||'').trim()||'Allowance',accountId:byName[String(x.account||'').toLowerCase()]||profile[0]?.accountId||'',weekly:Math.round((parseFloat(x.weekly)||0)*100),categories:x.categories||[],note:String(x.note||''),oneOff:false})).filter(x=>x.weekly>0);
-  const oneOffs=(j.oneOffs||[]).map(x=>({category:String(x.category||''),account:String(x.account||''),amount:Math.round((parseFloat(x.amount)||0)*100),reason:String(x.reason||'')}));
-  return{allowances,oneOffs};
+  const allowances=(j.allowances||[]).map(x=>{const cat=state.categories.find(c=>c.group+' > '+c.name===String(x.category||''))||state.categories.find(c=>c.name.toLowerCase()===String(x.name||'').toLowerCase());return{name:String(x.name||'').trim()||'Allowance',categoryId:cat?cat.id:'',accountId:state.settings.spendsAccountId||profile[0]?.accountId||'',weekly:Math.round((parseFloat(x.weekly)||0)*100),categories:[String(x.name||'')],note:String(x.note||''),oneOff:!!x.oneOff}}).filter(x=>x.weekly>0);
+  return{allowances,oneOffs:[]};
 }
 function livingSuggestModal(res,source){
   const opts=id=>activeAccounts().filter(a=>acctType(a).asset&&!a.noTx).sort(acctCmp).map(a=>`<option value="${a.id}" ${a.id===id?'selected':''}>${esc(a.name)}</option>`).join('');
-  const rows=res.allowances.map((x,i)=>`<tr><td><input type="checkbox" name="use${i}" checked></td><td><input name="name${i}" value="${esc(x.name)}" style="width:100%"><div class="dim" style="font-size:10.5px;margin-top:2px">${esc((x.categories||[]).join(', '))}</div></td><td><input name="weekly${i}" value="${(x.weekly/100).toFixed(2)}" inputmode="decimal" style="width:90px;text-align:right"></td><td><select name="acct${i}">${opts(x.accountId)}</select></td><td class="dim" style="font-size:11.5px;line-height:1.4">${esc(x.note)}</td></tr>`).join('');
-  const body=`<p class="dim" style="font-size:12.5px;line-height:1.6;margin-bottom:10px">${source==='ai'?'Claude read the last 3 months on your pots and shaped it into these allowances.':'No API key, so this is the plain average per pot.'} Untick anything you do not want, change names or amounts, then create. They arrive as weekly living allowances in the transfer${state.settings.spendMode!=='allowance'?' and Pay Split switches to "Living allowances" for living spend':''}.</p>
+  const rows=res.allowances.map((x,i)=>`<tr style="${x.oneOff?'opacity:.7':''}"><td><input type="checkbox" name="use${i}" ${x.oneOff?'':'checked'}></td><td><input name="name${i}" value="${esc(x.name)}" style="width:100%"><div class="dim" style="font-size:10.5px;margin-top:2px">${x.categoryId?esc(catShort(x.categoryId)):esc((x.categories||[]).join(', '))}${x.oneOff?' <span class="badge am">ONE-OFF?</span>':''}</div></td><td><input name="weekly${i}" value="${(x.weekly/100).toFixed(2)}" inputmode="decimal" style="width:90px;text-align:right"></td><td><select name="acct${i}">${opts(x.accountId)}</select></td><td class="dim" style="font-size:11.5px;line-height:1.4">${esc(x.note)}</td></tr>`).join('');
+  const body=`<p class="dim" style="font-size:12.5px;line-height:1.6;margin-bottom:10px">${source==='ai'?'Claude read the last 3 months on your pots and listed one allowance per category.':'One allowance per category from the last 3 months on your pots (add an API key for a smarter read).'} Rows marked ONE-OFF? start unticked. Untick anything you do not want, change names or amounts, then create. They arrive as weekly living allowances in the transfer${state.settings.spendMode!=='allowance'?' and Pay Split switches to "Living allowances" for living spend':''}.</p>
     <table class="compact"><thead><tr><th></th><th>Allowance</th><th class="r">Weekly $</th><th>Lands in</th><th>Why</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="dim" style="padding:14px">Nothing to propose - the pots have no categorised spend in the last 3 months.</td></tr>'}</tbody></table>
     ${res.oneOffs&&res.oneOffs.length?`<div class="sec-label" style="margin:14px 0 6px">Set aside as one-offs (not turned into allowances)</div><table class="compact"><tbody>${res.oneOffs.map(o=>`<tr><td>${esc(o.category)}</td><td class="mut">${esc(o.account)}</td><td class="r num">${fmt(o.amount)}</td><td class="dim" style="font-size:11.5px">${esc(o.reason)}</td></tr>`).join('')}</tbody></table>`:''}`;
   ui._suggest=res;
@@ -2145,7 +2167,26 @@ VIEWS.bills=()=>{
   const proj=ENGINE.billsProjection(12);
   const upcoming=ENGINE.upcomingBills(30);
   const act=state.bills.filter(b=>b.active!==false);
-  let h=`<div class="hero" style="margin-bottom:14px">
+  const tab0=ui.billTab||'bills';
+  let h='';
+  if(tab0==='living'){
+    const ls=ENGINE.livingSummary(),spends=byId(state.accounts,ls.accountId);
+    const incWk=Math.round(ENGINE.incomeMonthly()*12/52);
+    h+=`<div class="hero" style="margin-bottom:14px">
+    <div class="main-fig">
+      <div class="l" title="Every living allowance normalised to a week. Move this into the spends account each week and the envelopes are funded.">Weekly transfer to ${spends?esc(spends.name):'spends account'}</div>
+      <div class="v" style="color:var(--bl)">${fmt(ls.final)}</div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><span class="dim" style="font-family:var(--mono);font-size:11px">TO</span><select data-change="spends-account" style="width:170px">${acctOptions(ls.accountId)}</select>
+        <select data-change="living-round" style="width:110px"><option value="0" ${!state.settings.livingRound?'selected':''}>No rounding</option><option value="10" ${state.settings.livingRound==10?'selected':''}>Round to $10</option><option value="50" ${state.settings.livingRound==50?'selected':''}>Round to $50</option></select></div>
+    </div>
+    <div class="alt"><div class="l">Fortnightly</div><div class="v">${fmt(ls.fortnightly)}</div></div>
+    <div class="alt"><div class="l">Monthly</div><div class="v">${fmt(ls.monthly)}</div></div>
+    <div class="alt"><div class="l">Annual Living</div><div class="v">${fmt0(ls.annual)}</div></div>
+    <div class="alt"><div class="l">Both transfers</div><div class="v">${fmt(Math.round(s.final+ls.final))}</div><div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:2px">bills ${fmt(s.final)} + living ${fmt(ls.final)}</div></div>
+    ${incWk?(()=>{const left=incWk-Math.round(s.final)-Math.round(ls.final);return`<div class="alt"><div class="l">Left after both</div><div class="v" style="color:${left<0?'var(--rd)':'var(--gn)'}">${fmtS(left)}</div><div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:2px">minus debt minimums outside the transfer</div></div>`})():''}
+  </div>`;
+  }
+  else h+=`<div class="hero" style="margin-bottom:14px">
     <div class="main-fig">
       <div class="l" title="Every bill normalised to a true weekly cost: monthly x 12 / 52, quarterly x 4 / 52, half-yearly x 2 / 52, annual / 52. Transfer this every week and every bill is covered on average; the health check verifies the timing.">Weekly Transfer <span class="dim" style="font-size:10px">&#9432;</span></div>
       <div class="v">${fmt(s.final)}</div>
@@ -2153,7 +2194,7 @@ VIEWS.bills=()=>{
     </div>
     <div class="alt"><div class="l">Fortnightly</div><div class="v">${fmt(s.fortnightly)}</div></div>
     <div class="alt"><div class="l">Monthly</div><div class="v">${fmt(s.monthly)}</div></div>
-    ${s.livingWeekly?`<div class="alt"><div class="l">Of which living</div><div class="v" style="color:var(--bl)">${fmt(Math.round(s.livingWeekly))}</div><div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:2px">bills ${fmt(Math.round(s.billsWeekly))} + living ${fmt(Math.round(s.livingWeekly))}</div></div>`:''}
+    ${s.livingWeekly?`<div class="alt"><div class="l">Plus living</div><div class="v" style="color:var(--bl)">${fmt(Math.round(ENGINE.livingSummary().final))}</div><div class="dim" style="font-family:var(--mono);font-size:11px;margin-top:2px">to the spends account - see Living tab</div></div>`:''}
     <div class="alt"><div class="l">Annual Bills</div><div class="v">${fmt0(s.annual)}</div></div>
     ${(()=>{const incWk=Math.round(ENGINE.incomeMonthly()*12/52);
       if(!incWk)return '';
@@ -2411,7 +2452,8 @@ VIEWS.budget=()=>{
       const bills=state.bills.filter(b=>b.active!==false&&b.categoryId===c.id);
       const cyc=Math.max(1,...bills.map(ENGINE.billCycleMonths));
       // name on line 1, bill facts on line 2 (always present so rows keep one shape)
-      const meta=billCats[c.id]?`<span class="badge bl" title="${bills.map(b=>esc(b.name)).join(', ')}">BILLS</span> <span class="num">${fmt(Math.round(billCats[c.id]))}/mo</span>${smooth&&cyc>1?` &middot; <span title="Paid every ${cyc} months - each payment is spread across ${cyc} months so it compares to the monthly budget">spread /${cyc}mo</span>`:''}`:'<span class="dim">Not bill-backed</span>';
+      const alw=ENGINE.allowanceCats()[c.id];
+      const meta=billCats[c.id]?`<span class="badge bl" title="${bills.map(b=>esc(b.name)).join(', ')}">BILLS</span> <span class="num">${fmt(Math.round(billCats[c.id]))}/mo</span>${smooth&&cyc>1?` &middot; <span title="Paid every ${cyc} months - each payment is spread across ${cyc} months so it compares to the monthly budget">spread /${cyc}mo</span>`:''}`:alw?`<span class="badge" style="color:var(--or);border-color:var(--or)" title="Living allowance on the Bills > Living tab">LIVING</span> <span class="num">${fmt(Math.round(alw))}/mo</span>`:'<span class="dim">Not bill-backed</span>';
       h+=`<tr class="ln">
         <td><div>${esc(c.name)}</div><div class="meta" style="color:var(--tx3)">${meta}</div></td>
         <td class="r"><input data-change="budget-set" data-cat="${c.id}" value="${bv?(conv(bv)/100).toFixed(2):''}" placeholder="0.00" style="width:100px;text-align:right;background:transparent;border-color:#242424"></td>
@@ -3199,7 +3241,7 @@ const ACTIONS={
   'bill-add':()=>{ui.editing=null;openForm('Add Bill',billForm(),'bill-save')},
   'living-suggest':async el=>{
     const profile=livingSpendProfile();
-    if(!profile.length)return toast('Choose your living accounts first (top right)');
+    if(!profile.length)return toast('Pick the spends account in the hero first');
     if(!profile.some(p=>p.categories.length))return toast('No categorised spend on the pots in the last 3 months yet');
     el.disabled=true;el.textContent='Thinking...';
     try{
@@ -3213,7 +3255,7 @@ const ACTIONS={
     const tr=(state.categories.find(c=>c.group==='Transfers')||{}).id||'';let made=0;
     res.allowances.forEach((x,i)=>{
       if(!v['use'+i])return;const weekly=cents(v['weekly'+i]);if(!weekly)return;
-      state.bills.push({id:uid(),name:String(v['name'+i]||x.name).trim(),kind:'living',toAccountId:v['acct'+i]||x.accountId,freq:'weekly',amount:weekly,nextDue:todayISO(),active:true,inTransfer:true,autoAdvance:false,categoryId:tr,accountId:billsAccountIds()[0]||'',method:'Transfer',matchKeyword:'',notes:x.note||''});made++;
+      state.bills.push({id:uid(),name:String(v['name'+i]||x.name).trim(),kind:'living',toAccountId:v['acct'+i]||x.accountId,freq:'weekly',amount:weekly,nextDue:todayISO(),active:true,inTransfer:true,autoAdvance:false,categoryId:x.categoryId||tr,accountId:state.settings.spendsAccountId||'',method:'Transfer',matchKeyword:'',notes:x.note||''});made++;
     });
     if(made&&state.settings.spendMode!=='allowance')state.settings.spendMode='allowance';
     ui._suggest=null;MODAL.close();save();render();toast(made?`${made} allowance${made>1?'s':''} created - weekly transfer updated`:'Nothing selected');
@@ -3354,7 +3396,7 @@ ${JSON.stringify(reviewSummary())}`;
     state.budgets[ui.budgetMonth]={...state.budgets[prev]};save();render();toast('Copied budget from '+fmtMY(prev+'-01'));
   },
   'budget-prefill':()=>{
-    const bc=ENGINE.billBackedCats();
+    const bc=Object.assign({},ENGINE.allowanceCats(),ENGINE.billBackedCats());
     if(!Object.keys(bc).length)return toast('No active bills with categories to pre-fill from');
     state.budgets[ui.budgetMonth]=state.budgets[ui.budgetMonth]||{};
     let n=0;
@@ -3674,6 +3716,8 @@ const CHANGES={
   'tx-sel-all':el=>{const list=txFiltered().slice(ui.txPage*100,(ui.txPage+1)*100);el.checked?list.forEach(t=>ui.txSel.add(t.id)):list.forEach(t=>ui.txSel.delete(t.id));render()},
   'bills-buffer':el=>{state.settings.billsBuffer=clamp(parseFloat(el.value)||0,0,50);save();render()},
   'bills-round':el=>{state.settings.billsRound=+el.value;save();render()},
+  'spends-account':el=>{state.settings.spendsAccountId=el.value;save();render()},
+  'living-round':el=>{state.settings.livingRound=parseInt(el.value)||0;save();render()},
   'bills-account':el=>{state.settings.billsAccountId=el.value;state.settings.billsAccountIds=el.value?[el.value]:[];save();render()},
   'bills-account-multi':el=>{const s=new Set(billsAccountIds());if(el.checked)s.add(el.dataset.id);else s.delete(el.dataset.id);state.settings.billsAccountIds=[...s];state.settings.billsAccountId=[...s][0]||'';ui.billsPickOpen=true;save();render()},
   'living-account':el=>{const s=new Set(state.settings.livingAccountIds||[]);if(el.checked)s.add(el.dataset.id);else s.delete(el.dataset.id);state.settings.livingAccountIds=[...s];ui.livingPickOpen=true;save();render()},
