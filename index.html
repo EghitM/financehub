@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-17.15';
+const BUILD='2026-09-17.16';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -848,11 +848,13 @@ const ENGINE={
   billsCommitMonthly(){return Math.round(ENGINE.billsSummary().final*52/12)},
   /* spends-account projection: pots start at their combined balance, the
      living transfer lands each week, spend leaves at the 3-month average rate */
-  livingProjection(weeks=12){
+  /* mode 'plan' = spend at the allowances (mirrors the bills projection, which
+     uses the register, not history); 'actual' = spend at the 3-month average */
+  livingProjection(weeks=12,mode='actual'){
     const ls=ENGINE.livingSummary();
     const pots=ENGINE.livingPotIds();
     const opening=sum(pots.map(id=>(byId(state.accounts,id)||{balance:0}).balance));
-    const outWk=Math.round(ENGINE.livingActualMonthly()*12/52);
+    const outWk=mode==='plan'?Math.round(ls.weekly):Math.round(ENGINE.livingActualMonthly()*12/52);
     // two points per week so the transfer is visible: balance right after the
     // top-up lands, then after the week's spend - a sawtooth like the bills chart
     const rows=[],pts=[];let bal=opening;
@@ -2027,12 +2029,16 @@ function livingDashboard(){
   let h='';
   if(!allow.length&&!pots.length)return `<div class="card" style="margin-bottom:14px"><p class="dim" style="font-size:12.5px;line-height:1.7">Nothing here yet. Pick the spends account in the hero above, then use Suggest allowances on the Pots card - or edit a bill (Revolut, groceries, haircuts) and tick "Living allowance" to move it across.</p></div>`;
   h+='<div class="grid g2" style="margin-bottom:14px"><div class="grid" style="gap:14px;align-content:start">';
-  const proj=ENGINE.livingProjection(12);
-  h+=`<div class="card"><h3>Spends Account Health <span class="r dim" style="font-family:var(--mono);font-size:11px">12 WEEK PROJECTION</span></h3>`;
-  if(!pots.length)h+=`<p class="dim" style="font-size:12.5px;line-height:1.6">Pick the spends account in the hero to project its balance: living transfer of ${fmt(ls.final)} in each week, average spend out.</p>`;
+  const pmode=ui.livingProjMode||'both';
+  const plan=ENGINE.livingProjection(12,'plan'),actual=ENGINE.livingProjection(12,'actual');
+  h+=`<div class="card"><h3>Spends Account Health <span class="r pill-row" style="gap:4px;align-items:center"><span class="dim" style="font-family:var(--mono);font-size:11px;margin-right:6px">12 WEEK PROJECTION</span>${[['plan','Plan'],['actual','Actuals'],['both','Both']].map(([k,l])=>`<button class="btn sm ${pmode===k?'primary':''}" data-action="living-proj-mode" data-m="${k}" style="padding:2px 8px;font-size:10px">${l}</button>`).join('')}</span></h3>`;
+  if(!pots.length)h+=`<p class="dim" style="font-size:12.5px;line-height:1.6">Pick the spends account in the hero to project its balance: living transfer of ${fmt(ls.final)} in each week, allowances or average spend out.</p>`;
   else{
-    h+=chart('living-proj',el=>CH.line(el,{labels:proj.pts.map(p=>p.label),series:[{name:'Balance (transfer in, then spend out)',color:proj.net<0?CONFIG.colors.rd:CONFIG.colors.gn,data:proj.pts.map(p=>p.bal)}],fillFirst:true,height:180}));
-    h+=`<div style="margin-top:10px;font-size:12.5px;font-family:var(--mono);color:${proj.net<0?'var(--rd)':'var(--gn)'}">${proj.net<0?'&#9888;':'&#10003;'} Each week: <b>+${fmt(proj.inWk)}</b> transfer lands, <b>-${fmt(proj.outWk)}</b> spent (3-month average) &middot; net ${fmtS(proj.net)}/wk${proj.shortfalls.length?` &middot; pots empty by week ${proj.shortfalls[0].week}`:''} &middot; opening ${fmt(proj.opening)}.</div>`;
+    const series=[];
+    if(pmode!=='actual')series.push({name:'Plan - spending at the allowances',color:CONFIG.colors.gn,data:plan.pts.map(p=>p.bal)});
+    if(pmode!=='plan')series.push({name:'Actuals - spending at the 3-month average',color:actual.net<0?CONFIG.colors.rd:CONFIG.colors.bl,data:actual.pts.map(p=>p.bal)});
+    h+=chart('living-proj',el=>CH.line(el,{labels:plan.pts.map(p=>p.label),series,fillFirst:series.length===1,height:180}));
+    h+=`<div style="margin-top:10px;font-size:12.5px;font-family:var(--mono);line-height:1.7">${pmode!=='actual'?`<div style="color:var(--gn)">&#10003; Plan: <b>+${fmt(plan.inWk)}</b> in, <b>-${fmt(plan.outWk)}</b> out at the allowances &middot; net ${fmtS(plan.net)}/wk - this is what the register promises, the way the Bills chart reads the bills register.</div>`:''}${pmode!=='plan'?`<div style="color:${actual.net<0?'var(--rd)':'var(--bl)'}">${actual.net<0?'&#9888;':'&#10003;'} Actuals: <b>+${fmt(actual.inWk)}</b> in, <b>-${fmt(actual.outWk)}</b> out at the 3-month average &middot; net ${fmtS(actual.net)}/wk${actual.shortfalls.length?` &middot; pots empty by week ${actual.shortfalls[0].week}`:''}${actual.net<plan.net?` - the pot is spending ${fmt(actual.outWk-plan.outWk)}/wk more than the allowances`:''}.</div>`:''}<div class="dim" style="font-size:11px">Opening balance ${fmt(plan.opening)}.</div></div>`;
   }
   h+='</div>';
   const byCat={};for(const b of allow){const k=b.categoryId?catShort(b.categoryId):'Uncategorised';byCat[k]=(byCat[k]||0)+ENGINE.billAnnual(b)}
@@ -3368,6 +3374,7 @@ const ACTIONS={
     MODAL.close();save();render();toast('Bill saved - weekly transfer updated');
   },
   'bill-cat-period':el=>{ui.billCatPeriod=el.dataset.p;render()},
+  'living-proj-mode':el=>{ui.livingProjMode=el.dataset.m;render()},
   'review-go':el=>{
     const i=ENGINE.healthCheck()[+el.dataset.i];if(!i)return;
     if(i.view==='transactions'&&i.ids){ui.txFilter={account:'',category:'',from:'',to:'',q:'',tag:'',ids:i.ids,pinLabel:i.title};ui.txPage=0;ui.txSel.clear()}
