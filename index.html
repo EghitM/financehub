@@ -115,7 +115,10 @@ tr.grp .cnt{font-family:var(--mono);font-size:10.5px;color:var(--tx3);margin-lef
 tr.grp .car{display:inline-block;width:14px;color:var(--tx3);font-size:10px}
 tr.ln td{vertical-align:top;white-space:nowrap}tr.ln td:first-child{padding-left:22px;border-left:3px solid transparent;white-space:normal}
 tr.ln .meta{font-family:var(--mono);font-size:11px;margin-top:3px;line-height:1.4}
-.linkish{cursor:pointer;border-bottom:1px dotted currentColor}.linkish:hover{color:var(--or)}tr.ln .meta .badge{vertical-align:middle}
+.linkish{cursor:pointer;border-bottom:1px dotted currentColor}.linkish:hover{color:var(--or)}
+details.excl{position:relative}details.excl summary{list-style:none;cursor:pointer}details.excl summary::-webkit-details-marker{display:none}
+.excl-panel{position:absolute;z-index:30;top:calc(100% + 6px);left:0;min-width:220px;background:var(--s2);border:1px solid var(--bd2);border-radius:8px;padding:8px 10px;display:grid;gap:4px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.excl-panel .chk{font-size:12.5px;white-space:nowrap}tr.ln .meta .badge{vertical-align:middle}
 tr.ln.first td{padding-top:9px}
 tr.sub td{background:#121212;font-family:var(--mono);font-size:11.5px;color:var(--tx2);padding:5px 10px 7px;border-bottom:0}
 tr.sub td:first-child{border-left:3px solid transparent;padding-left:22px;font-family:var(--head);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--tx3)}
@@ -260,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-17.2';
+const BUILD='2026-09-17.5';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -1838,6 +1841,8 @@ function txFiltered(){
   const pin=f.ids?new Set(f.ids):null;
   let list=state.transactions.filter(t=>
     (!pin||pin.has(t.id))&&
+    (!f.household||!isExcludedTx(t))&&
+    (!(f.exclude&&f.exclude.length)||!f.exclude.includes(t.accountId))&&
     (!f.account||t.accountId===f.account)&&
     (!f.category||t.categoryId===f.category)&&
     (!f.from||t.date>=f.from)&&(!f.to||t.date<=f.to)&&
@@ -1907,7 +1912,11 @@ VIEWS.transactions=()=>{
     ${(()=>{const tags=[...new Set(state.transactions.flatMap(t=>t.tags||[]))].sort();
       return tags.length?`<select data-change="tx-filter" data-k="tag" style="width:130px"><option value="">All tags</option>${tags.map(tg=>`<option value="${esc(tg)}" ${f.tag===tg?'selected':''}>${esc(tg)}</option>`).join('')}</select>`:''})()}
     ${f.ids?`<span class="badge am" title="${esc(f.pinLabel||'')}">HEALTH CHECK &middot; ${f.ids.length} ROWS</span>`:''}
-    ${(f.account||f.category||f.from||f.to||f.q||f.ids)?'<button class="btn sm ghost" data-action="tx-clear-filter">clear</button>':''}
+    ${f.household?`<span class="badge bl" title="Business accounts hidden - the same rule Budget and Reports use">HOUSEHOLD ONLY</span>`:''}
+    ${(()=>{const ex=f.exclude||[];const opts=state.accounts.filter(a=>!a.archived||ex.includes(a.id)||state.transactions.some(t=>t.accountId===a.id)).sort(acctCmp);return`<details class="excl" ${ui.txExclOpen?'open':''} data-toggle="tx-excl"><summary class="btn sm ${ex.length?'primary':''}" title="Hide transactions from these accounts">Exclude${ex.length?' ('+ex.length+')':''}</summary><div class="excl-panel">${opts.map(a=>`<label class="chk"><input type="checkbox" data-change="tx-exclude" data-id="${a.id}" ${ex.includes(a.id)?'checked':''}> ${esc(a.name)}${a.archived?' <span class="dim">(archived)</span>':''}</label>`).join('')}</div></details>`})()}
+    ${(f.account||f.category||f.from||f.to||f.q||f.ids||f.household||(f.exclude&&f.exclude.length))?'<button class="btn sm ghost" data-action="tx-clear-filter">clear</button>':''}
+    <span class="spacer"></span>
+    ${(()=>{const all=txFiltered();const inn=sum(all.filter(t=>t.amount>0).map(t=>t.amount)),out=sum(all.filter(t=>t.amount<0).map(t=>-t.amount));return`<span class="num dim" style="font-size:12px;white-space:nowrap" title="Totals of everything matching the current filters">${all.length} rows &middot; <span class="pos">${fmt(inn)}</span> in &middot; <span class="neg">${fmt(out)}</span> out &middot; net <b style="color:${inn-out>=0?'var(--gn)':'var(--rd)'}">${fmtS(inn-out)}</b></span>`})()}
   </div>`;
   if(upcoming.length){
     h+=`<div class="card" style="margin-bottom:14px;padding:10px 14px"><span class="sec-label">Upcoming recurring (30d): </span>`+
@@ -1997,9 +2006,36 @@ function livingDashboard(){
       ${top.length?`<table class="compact"><tbody>${top.map(([k,v])=>`<tr><td>${esc(k)}</td><td class="r num">${fmt(Math.round(v/3))}/mo</td><td class="r dim num" style="font-size:11px">${spentMo?Math.round(v/3/spentMo*100):0}%</td></tr>`).join('')}</tbody></table>`:'<p class="dim" style="font-size:12px">No categorised spend on this account in the last 3 months.</p>'}
     </div>`;
   }
+  h+=livingBudgetCard(billCats);
   const noPot=allow.filter(b=>!b.toAccountId);
   if(noPot.length)h+=`<div class="card"><h3>Not tracked</h3><p class="dim" style="font-size:12.5px;line-height:1.6">${noPot.map(b=>esc(b.name)).join(', ')} ${noPot.length>1?'have':'has'} no "lands in account" set, so actual spend cannot be compared. Edit and pick the pot it goes to.</p></div>`;
   h+='</div>';
+  return h;
+}
+/* the variable-spend side of Living: every budget category that is not
+   bill-backed (groceries, fuel, dining, coffee...) with this month's budget vs
+   actual - the envelopes the allowances are supposed to cover */
+function livingBudgetCard(billCats){
+  const mk=monthKey(todayISO()),budget=state.budgets[mk]||{},act=ENGINE.monthActualsSmoothed(mk);
+  const rows=[];let bT=0,aT=0;
+  for(const c of state.categories){
+    if(['Income','Transfers'].includes(c.group)||billCats.has(c.id))continue;
+    const bv=budget[c.id]||0,av=Math.max(0,-(act[c.id]||0));
+    if(!bv&&!av)continue;bT+=bv;aT+=av;rows.push({c,bv,av});
+  }
+  rows.sort((x,y)=>(y.bv||y.av)-(x.bv||x.av));
+  const la=ENGINE.livingAllowanceMonthly();
+  const dayFrac=clamp(parseInt(todayISO().slice(8))/parseInt(new Date(new Date(mk+'-01').getFullYear(),new Date(mk+'-01').getMonth()+1,0).getDate().toString()),0,1);
+  let h=`<div class="card"><h3>Living budget <span class="r dim" style="font-family:var(--mono);font-size:11px">${fmtMY(mk+'-01').toUpperCase()} &middot; ${Math.round(dayFrac*100)}% THROUGH</span></h3>
+    <p class="dim" style="font-size:12px;line-height:1.6;margin-bottom:8px">The envelopes your allowances have to cover: every budget category that is not backed by a bill. Budget figures come from the Budget page${bT&&la?`; this month's living budget is <b class="num" style="color:var(--tx)">${fmt(bT)}</b> against <b class="num" style="color:var(--tx)">${fmt(la)}</b> of allowances${bT>la?` - <span style="color:var(--am)">${fmt(bT-la)} short</span>`:` - ${fmt(la-bT)} spare`}`:''}.</p>`;
+  if(!rows.length)return h+`<p class="dim" style="font-size:12.5px">Nothing budgeted or spent in living categories this month. Set figures on the Budget page and they show here.</p><div class="pill-row" style="margin-top:8px"><button class="btn sm" data-action="nav" data-view="budget">Open Budget &rarr;</button></div></div>`;
+  h+='<table class="compact"><thead><tr><th>Category</th><th class="r">Budget</th><th class="r">Spent</th><th class="r">Left</th><th style="width:34%"></th></tr></thead><tbody>';
+  for(const {c,bv,av} of rows){
+    const p=bv?av/bv:(av?1.01:0);const cls=p>1?'over':p>dayFrac+0.1?'warn':'';
+    h+=`<tr><td>${esc(c.name)}<div class="dim" style="font-size:10.5px">${esc(c.group)}</div></td><td class="r num">${bv?fmt(bv):'<span class="dim">\u2014</span>'}</td><td class="r num"><span class="linkish" data-action="budget-drill" data-cat="${c.id}" data-cyc="1">${fmt(av)}</span></td><td class="r num" style="color:${bv?(bv-av>=0?'var(--gn)':'var(--rd)'):'var(--tx3)'}">${bv?fmtS(bv-av):''}</td><td><div class="pbar"><div class="${cls}" style="width:${clamp(p*100,0,100)}%"></div></div></td></tr>`;
+  }
+  h+=`<tr class="tot"><td>Total</td><td class="r num">${fmt(bT)}</td><td class="r num">${fmt(aT)}</td><td class="r num" style="color:${bT-aT>=0?'var(--gn)':'var(--rd)'}">${fmtS(bT-aT)}</td><td><div class="pbar"><div class="${aT>bT?'over':''}" style="width:${clamp(bT?aT/bT*100:0,0,100)}%"></div></div></td></tr></tbody></table>
+    <div class="pill-row" style="margin-top:10px"><button class="btn sm" data-action="nav" data-view="budget">Edit budget &rarr;</button></div></div>`;
   return h;
 }
 /* ---------------- HEALTH CHECK ---------------- */
@@ -3006,7 +3042,7 @@ const ACTIONS={
   },
   'tx-sort':el=>{const k=el.dataset.k;if(ui.txSort.key===k)ui.txSort.dir*=-1;else ui.txSort={key:k,dir:k==='date'?-1:1};render()},
   'tx-page':el=>{ui.txPage+=+el.dataset.d;render()},
-  'tx-clear-filter':()=>{ui.txFilter={account:'',category:'',from:'',to:'',q:'',tag:''};ui.txPage=0;render()},
+  'tx-clear-filter':()=>{ui.txFilter={account:'',category:'',from:'',to:'',q:'',tag:''};ui.txPage=0;ui.txExclOpen=false;render()},
   'tx-tag':el=>{const t=el.dataset.tag;ui.txFilter.tag=(ui.txFilter.tag===t?'':t);ui.txPage=0;setView('transactions')},
   'tx-bulk-move':()=>{
     const ids=[...ui.txSel];const from=new Set(ids.map(id=>(byId(state.transactions,id)||{}).accountId));
@@ -3217,7 +3253,7 @@ ${JSON.stringify(reviewSummary())}`;
   'budget-drill':el=>{
     const mk=ui.budgetMonth,cyc=Math.max(1,parseInt(el.dataset.cyc)||1);
     const from=addMonths(mk+'-01',-(cyc-1)),to=addDays(addMonths(mk+'-01',1),-1);
-    ui.txFilter={account:'',category:el.dataset.cat,from,to,q:''};ui.txPage=0;
+    ui.txFilter={account:'',category:el.dataset.cat,from,to,q:'',household:true};ui.txPage=0;
     setView('transactions');
     if(cyc>1)toast(`Showing ${cyc} months - this category's bill is paid every ${cyc} months, so ${fmtMY(mk+'-01')}'s figure spreads payments from ${fmtMY(from)} onward`);
   },
@@ -3550,6 +3586,7 @@ function ruleForm(rl={}){
 /* ---- change/input delegated handlers ---- */
 const CHANGES={
   'tx-filter':el=>{ui.txFilter[el.dataset.k]=el.value;ui.txPage=0;render()},
+  'tx-exclude':el=>{const ex=new Set(ui.txFilter.exclude||[]);if(el.checked)ex.add(el.dataset.id);else ex.delete(el.dataset.id);ui.txFilter.exclude=[...ex];ui.txPage=0;ui.txExclOpen=true;render()},
   'tx-sel':el=>{el.checked?ui.txSel.add(el.dataset.id):ui.txSel.delete(el.dataset.id);render()},
   'tx-sel-all':el=>{const list=txFiltered().slice(ui.txPage*100,(ui.txPage+1)*100);el.checked?list.forEach(t=>ui.txSel.add(t.id)):list.forEach(t=>ui.txSel.delete(t.id));render()},
   'bills-buffer':el=>{state.settings.billsBuffer=clamp(parseFloat(el.value)||0,0,50);save();render()},
@@ -3858,6 +3895,7 @@ document.addEventListener('mousemove',e=>{
   }
 });
 $('#modal-layer').addEventListener('mousedown',e=>{if(e.target.id==='modal-layer')MODAL.close()});
+document.addEventListener('toggle',e=>{const d=e.target;if(d&&d.dataset&&d.dataset.toggle==='tx-excl')ui.txExclOpen=d.open},true);
 // receipt zone: paste anywhere in the Add/Edit Transaction modal, or drop/pick on the zone
 $('#modal-layer').addEventListener('paste',e=>{
   if(!$('#receipt-zone'))return;
