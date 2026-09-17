@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-17.13';
+const BUILD='2026-09-17.14';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -471,6 +471,7 @@ function billFreqLabel(b){
    drift/actuals when payments are matched, instalments left for a schedule,
    otherwise what is missing. Sentence case, mono figures. */
 function billMetaLine(b){
+  if(b.kind==='living'){const wn=allowanceWindow(b),sp=allowanceSpentThisMonth(b);const over=sp>wn.allowed;return{t:`Spent ${fmt(sp)} of ${fmt(wn.allowed)} ${wn.label}${over?` &middot; ${fmt(sp-wn.allowed)} over`:''}`,c:over?'var(--am)':'var(--tx3)'}}
   if(b.freq==='schedule'){const r=ENGINE.scheduleRemaining(b);return b.scheduleDone?{t:'All instalments paid',c:'var(--gn)'}:{t:`${r.count} of ${r.of} instalment${r.of===1?'':'s'} left &middot; ${fmt(r.total)} to go`,c:'var(--tx3)'}}
   const dr=ENGINE.billDrift(b);
   if(dr){const off=Math.abs(dr.pc)>10;
@@ -2366,7 +2367,7 @@ VIEWS.bills=()=>{
         <td>${esc(b.name)}${b.cancelled?` <span class="badge" title="Cancelled${b.cancelledDate?' '+fmtD(b.cancelledDate):''} - kept for history">CANCELLED</span>`:b.active===false?' <span class="badge">PAUSED</span>':''}${b.inTransfer===false?' <span class="badge am" title="Not funded by the weekly transfer - paid from another account">NOT IN TRANSFER</span>':''}${b.debtId?` <span class="badge rd" title="Funds the repayment of '${esc((byId(state.debts,b.debtId)||{}).name||'')}' - Pay Split counts it once">&#9660; ${esc((byId(state.debts,b.debtId)||{}).name||'debt')}</span>`:''}${b.autoFrom?' <span class="badge" title="Managed by the debt - edit the amount or frequency on the debt itself">AUTO</span>':''}${b.notes?` <span class="dim" title="${esc(b.notes)}">&#9776;</span>`:''}
           ${(mt=>`<div class="meta" style="color:${mt.c}" ${mt.title?`title="${esc(mt.title)}"`:''}>${mt.t}</div>`)(billMetaLine(b))}</td>
         <td class="mut">${esc(billFreqLabel(b))}</td>
-        ${tab==='living'?(()=>{const sp=allowanceSpentThisMonth(b),al=Math.round(ENGINE.billMonthly(b)),left=al-sp,p=al?sp/al:(sp?1.01:0);return`<td class="r num"><span class="linkish" data-action="budget-drill" data-cat="${b.categoryId}" data-cyc="1" title="Show this month's transactions">${fmt(sp)}</span></td><td class="r num" style="color:${left>=0?'var(--gn)':'var(--rd)'}">${fmtS(left)}</td><td><div class="pbar"><div class="${p>1?'over':p>monthFrac()+0.1?'warn':''}" style="width:${clamp(p*100,0,100)}%"></div></div></td>`})():`<td class="mut">${esc(b.method||'')}</td>
+        ${tab==='living'?(()=>{const wn=allowanceWindow(b),sp=allowanceSpentThisMonth(b),al=wn.allowed,left=al-sp,p=al?sp/al:(sp?1.01:0);return`<td class="r num"><span class="linkish" data-action="budget-drill" data-cat="${b.categoryId}" data-cyc="${wn.months}" title="Show the transactions ${wn.label}">${fmt(sp)}</span>${wn.months>1?`<div class="dim" style="font-size:10.5px">${wn.label}</div>`:''}</td><td class="r num" style="color:${left>=0?'var(--gn)':'var(--rd)'}">${fmtS(left)}</td><td><div class="pbar"><div class="${p>1?'over':p>monthFrac()+0.1?'warn':''}" style="width:${clamp(p*100,0,100)}%"></div></div></td>`})():`<td class="mut">${esc(b.method||'')}</td>
         ${(lp=>`<td class="mut num" title="${lp?'From transactions: '+fmt(lp.total)+' on '+fmtD(lp.date):'No matching transaction yet - set a match keyword'}">${lp?fmtD(lp.date):'<span class="dim">\u2014</span>'}</td>`)(ENGINE.billLastPaid(b))}
         <td class="mut">${b.scheduleDone?'<span class="badge gn">COMPLETE</span>':fmtD(b.nextDue)}${b.autoAdvance!==false&&(b.matchKeyword||'').trim()?'':' <span class="dim" title="No keyword or auto-advance off - the due date only moves when you press Paid">&#8226;</span>'}</td>`}
         <td class="r">${fmt(b.amount)}</td>
@@ -2379,7 +2380,7 @@ VIEWS.bills=()=>{
     if(g!==''&&bills.length>1)h+=`<tr class="sub"><td colspan="6">Subtotal &middot; ${esc(g)}</td><td class="r num">${fmt(Math.round(gw))}</td><td class="r num">${fmt(Math.round(ga/12))}</td><td class="r num">${fmt0(ga)}</td><td></td></tr>`;
   }
   const filtered=list.length!==state.bills.filter(b=>(ui.billTab||'bills')==='living'?b.kind==='living':b.kind!=='living').length;
-  h+=`<tr class="tot">${tab==='living'?(()=>{const sp=sum(list.map(allowanceSpentThisMonth)),al=sum(list.map(b=>Math.round(ENGINE.billMonthly(b))));return`<td colspan="2">TOTAL</td><td class="r num">${fmt(sp)}</td><td class="r num" style="color:${al-sp>=0?'var(--gn)':'var(--rd)'}">${fmtS(al-sp)}</td><td><div class="pbar"><div class="${sp>al?'over':''}" style="width:${clamp(al?sp/al*100:0,0,100)}%"></div></div></td>`})():`<td colspan="5">${filtered?'TOTAL (SHOWN)':'TOTAL (ACTIVE)'}</td>`}<td></td><td class="r acc">${fmt(Math.round(shownWk))}</td><td class="r">${fmt(Math.round(shownAn/12))}</td><td class="r">${fmt0(shownAn)}</td><td></td></tr>`;
+  h+=`<tr class="tot">${tab==='living'?(()=>{const sp=sum(list.map(b=>allowanceWindow(b).months>1?Math.round(allowanceSpentThisMonth(b)/allowanceWindow(b).months):allowanceSpentThisMonth(b))),al=sum(list.map(b=>Math.round(ENGINE.billMonthly(b))));return`<td colspan="2">TOTAL</td><td class="r num">${fmt(sp)}</td><td class="r num" style="color:${al-sp>=0?'var(--gn)':'var(--rd)'}">${fmtS(al-sp)}</td><td><div class="pbar"><div class="${sp>al?'over':''}" style="width:${clamp(al?sp/al*100:0,0,100)}%"></div></div></td>`})():`<td colspan="5">${filtered?'TOTAL (SHOWN)':'TOTAL (ACTIVE)'}</td>`}<td></td><td class="r acc">${fmt(Math.round(shownWk))}</td><td class="r">${fmt(Math.round(shownAn/12))}</td><td class="r">${fmt0(shownAn)}</td><td></td></tr>`;
   if(filtered)h+=`<tr><td colspan="5" class="dim" style="font-size:11.5px">All active bills: ${fmt(Math.round(s.weekly))}/wk &middot; ${fmt0(s.annual)}/yr</td><td></td><td class="r dim num" style="font-size:11.5px">${fmt(Math.round(s.weekly))}</td><td class="r dim num" style="font-size:11.5px">${fmt(Math.round(s.annual/12))}</td><td class="r dim num" style="font-size:11.5px">${fmt0(s.annual)}</td><td></td></tr>`;
   h+='</tbody></table></div>';
   if(tab==='living')h+=livingGapList();
@@ -2388,9 +2389,18 @@ VIEWS.bills=()=>{
 /* spent this calendar month in an allowance's category on the pots
    (household only, transfers excluded) */
 function monthFrac(){const t=todayISO();const d=new Date(t+'T00:00:00');const days=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();return clamp(d.getDate()/days,0,1)}
+/* allowances shorter than a month (weekly, fortnightly) and monthly ones are
+   judged on the calendar month; longer cycles (quarterly, half-yearly, annual)
+   are judged over their cycle, otherwise one lumpy GP bill looks like a blown
+   month when it is exactly on plan for the half-year */
+function allowanceWindow(b){
+  const cyc=Math.max(1,ENGINE.billCycleMonths(b));
+  const mk=monthKey(todayISO());
+  return{months:cyc,from:cyc>1?monthKey(addMonths(mk+'-01',-(cyc-1))):mk,to:mk,label:cyc<=1?'this month':cyc===3?'this quarter':cyc===6?'this half-year':cyc===12?'this year':'last '+cyc+' months',allowed:cyc<=1?Math.round(ENGINE.billMonthly(b)):b.amount};
+}
 function allowanceSpentThisMonth(b){
-  if(!b.categoryId)return 0;const mk=monthKey(todayISO());const pots=new Set(ENGINE.livingPotIds());
-  return sum(state.transactions.filter(t=>t.categoryId===b.categoryId&&t.amount<0&&monthKey(t.date)===mk&&!isExcludedTx(t)&&(pots.size?pots.has(t.accountId):true)).map(t=>-t.amount));
+  if(!b.categoryId)return 0;const w=allowanceWindow(b);const pots=new Set(ENGINE.livingPotIds());
+  return sum(state.transactions.filter(t=>t.categoryId===b.categoryId&&t.amount<0&&monthKey(t.date)>=w.from&&monthKey(t.date)<=w.to&&!isExcludedTx(t)&&(pots.size?pots.has(t.accountId):true)).map(t=>-t.amount));
 }
 /* categories with real living spend and no allowance yet - the to-do list */
 function livingGapList(){
