@@ -260,7 +260,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-16.19';
+const BUILD='2026-09-17.1';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -468,6 +468,9 @@ function billMetaLine(b){
   if(b.freq==='schedule'){const r=ENGINE.scheduleRemaining(b);return b.scheduleDone?{t:'All instalments paid',c:'var(--gn)'}:{t:`${r.count} of ${r.of} instalment${r.of===1?'':'s'} left &middot; ${fmt(r.total)} to go`,c:'var(--tx3)'}}
   const dr=ENGINE.billDrift(b);
   if(dr){const off=Math.abs(dr.pc)>10;return{t:`Actuals avg ${fmt(dr.avg)}${off?` &middot; ${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered`:''}`,c:off?'var(--am)':'var(--tx3)',title:off?'Update the amount so the weekly transfer matches what is really coming out':''}}
+  // one match is not enough for a drift average, but it is a match
+  const lp=ENGINE.billLastPaid(b);
+  if(lp)return{t:`1 payment matched &middot; ${fmt(lp.total)} on ${fmtD(lp.date)}`,c:'var(--tx3)',title:'The actuals average appears once two payments have matched'};
   if(!(b.matchKeyword||'').trim())return{t:'No match keyword',c:'var(--tx3)',title:'Add a keyword so payments link, Last paid fills in and the due date advances itself'};
   return{t:'No payments matched yet',c:'var(--tx3)'};
 }
