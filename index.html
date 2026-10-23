@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-10-23.3';
+const BUILD='2026-10-23.4';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -4710,9 +4710,13 @@ const PS={
     return PS.call('/users/'+state.settings.psUserId+'/transaction_accounts');
   },
   async transactions(psId,since){
+    // PocketSmith validates start/end as a pair - always send both, and never
+    // a start after today
+    const end=todayISO();
+    if(since>end)since=end;
     const out=[];let page=1;
     while(page<=20){
-      const batch=await PS.call('/transaction_accounts/'+psId+'/transactions?start_date='+since+'&per_page=100&page='+page);
+      const batch=await PS.call('/transaction_accounts/'+psId+'/transactions?start_date='+since+'&end_date='+end+'&per_page=100&page='+page);
       out.push(...batch);
       if(batch.length<100)break;
       page++;
