@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-10-23.2';
+const BUILD='2026-10-23.3';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -2006,6 +2006,7 @@ VIEWS.transactions=()=>{
   let h=`<div class="toolbar">
     <button class="btn primary" data-action="tx-add">+ Add</button>
     <button class="btn" data-action="csv-import">Import CSV</button>
+    ${state.settings.psKey?`<button class="btn" data-action="ps-pull" title="Pull transactions and balances from your PocketSmith bank feeds${state.settings.psLastPull?' - last pull '+fmtD(state.settings.psLastPull):''}">&#8645; PocketSmith</button>`:''}
     <button class="btn" data-action="ai-import" title="${state.settings.apiKey?'Extract transactions from a PDF or photographed statement with Claude':'Add your Anthropic API key in Settings first'}">&#10022; AI import statement</button>
     <button class="btn" data-action="ai-categorise" title="${state.settings.apiKey?'Categorise uncategorised transactions with Claude':'Add your Anthropic API key in Settings first'}">&#10022; AI categorise${(c=>c?` (${c})`:'')(state.transactions.filter(t=>!t.categoryId).length)}</button>
     <button class="btn" data-action="tx-export">Export CSV</button>
@@ -3143,6 +3144,12 @@ VIEWS.settings=()=>{
     <label class="f"><span class="fl">Anthropic API key</span><input type="password" name="apikey" value="${esc(state.settings.apiKey||'')}" placeholder="sk-ant-..." data-change="set-apikey" autocomplete="off" spellcheck="false"></label>
     <div class="pill-row" style="margin-top:6px"><button class="btn sm" data-action="ai-test" ${state.settings.apiKey?'':'disabled'}>Test key</button><span class="dim" style="font-size:12px;align-self:center">${state.settings.apiKey?'Key saved - use "AI categorise" in Transactions':'No key saved'}</span></div>
   </div>`;
+  h+=`<div class="card"><h3>PocketSmith</h3>
+    <p class="dim" style="font-size:12.5px;margin-bottom:12px;line-height:1.6">Pull transactions and live balances from your PocketSmith bank feeds on demand - no more CSV exports for day-to-day updates. The developer key comes from PocketSmith &rarr; Settings &rarr; Security &rarr; Manage developer keys; it is stored only in this browser and never synced or backed up. Read-only in practice: this app only ever GETs.</p>
+    <label class="f"><span class="fl">Developer key</span><input type="password" value="${esc(state.settings.psKey||'')}" placeholder="from PocketSmith security settings" data-change="set-pskey" autocomplete="off" spellcheck="false"></label>
+    <label class="f"><span class="fl">API base URL (only change if using a CORS proxy)</span><input value="${esc(state.settings.psBase||'')}" placeholder="https://api.pocketsmith.com/v2" data-change="set-psbase" autocomplete="off" spellcheck="false"></label>
+    <div class="pill-row" style="margin-top:6px"><button class="btn sm" data-action="ps-test" ${state.settings.psKey?'':'disabled'}>Test connection</button><button class="btn sm primary" data-action="ps-pull" ${state.settings.psKey?'':'disabled'}>Pull now</button><span class="dim" style="font-size:12px;align-self:center">${state.settings.psLastPull?'Last pull '+fmtD(state.settings.psLastPull):state.settings.psKey?'Key saved':'No key saved'}</span></div>
+  </div>`;
   const bdue=BACKUP.due(),lastF=BACKUP.last('file'),lastC=BACKUP.last('cloud');
   const fmtSize=b=>b>1e6?(b/1e6).toFixed(1)+' MB':Math.round(b/1e3)+' KB';
   h+=`<div class="card"><h3>Backup &amp; Restore ${bdue.due&&!bdue.snoozed?'<span class="badge am">DUE</span>':''}</h3>
@@ -3816,7 +3823,7 @@ ${JSON.stringify(reviewSummary())}`;
     try{
       const data=JSON.parse(await BACKUP.fetchCloud(f));
       if(!data||!Array.isArray(data.accounts))throw new Error('not a FinanceHub backup');
-      const keep={ghToken:state.settings.ghToken,gistId:state.settings.gistId,apiKey:state.settings.apiKey};
+      const keep={ghToken:state.settings.ghToken,gistId:state.settings.gistId,apiKey:state.settings.apiKey,psKey:state.settings.psKey,psBase:state.settings.psBase};
       state=Object.assign(emptyState(),data);
       state.settings=Object.assign(emptyState().settings,state.settings,keep);
       state.syncMeta={rev:(state.syncMeta?.rev||0)+1000,ts:new Date().toISOString(),device:SYNC.device()};
@@ -3838,7 +3845,7 @@ ${JSON.stringify(reviewSummary())}`;
         // a restore is a deliberate rollback: keep this device's tokens and
         // gist ids, and out-rank whatever the cloud holds so sync pushes the
         // restored data instead of silently pulling the newer copy back over it
-        const keep={ghToken:state.settings.ghToken,gistId:state.settings.gistId||data.settings?.gistId||'',apiKey:state.settings.apiKey,backupGistId:state.settings.backupGistId||data.settings?.backupGistId||''};
+        const keep={ghToken:state.settings.ghToken,gistId:state.settings.gistId||data.settings?.gistId||'',apiKey:state.settings.apiKey,backupGistId:state.settings.backupGistId||data.settings?.backupGistId||'',psKey:state.settings.psKey,psBase:state.settings.psBase};
         state=Object.assign(emptyState(),data);
         state.settings=Object.assign(emptyState().settings,state.settings,keep);
         state.syncMeta={rev:Math.max(state.syncMeta?.rev||0,SYNC._lastRemoteRev||0)+1000,ts:new Date().toISOString(),device:SYNC.device()};
@@ -3979,6 +3986,8 @@ const CHANGES={
   'acct-group':el=>{ui.acctGroup=el.value;render()},
   'text-scale':el=>{state.settings.textScale=+el.value;applyTextScale();save()},
   'drift-pc':el=>{state.settings.driftPc=clamp(parseInt(el.value)||10,1,90);save();render()},
+  'set-pskey':el=>{state.settings.psKey=el.value.trim();delete state.settings.psUserId;save();render()},
+  'set-psbase':el=>{state.settings.psBase=el.value.trim();save()},
   'set-apikey':el=>{state.settings.apiKey=el.value.trim();save();render()},
   'pair-token':el=>{ui.pairToken=el.checked;const b=$('#modal-layer .modal-b');if(b&&ui._pairBody)b.innerHTML=ui._pairBody()},
   'backup-cadence':el=>{state.settings.backupCadence=el.value;state.settings.backupSnooze='';save();render()},
@@ -4069,6 +4078,58 @@ function wizParseRow(r){
   }else amount=cents(r[w.map.amount]);
   if(!date||!desc)return null;
   return{date,desc,amount};
+}
+function psHtml(){
+  const p=ui.ps||{};
+  if(p.step==='loading')return`<p class="dim" style="font-size:13px;font-family:var(--mono)">Contacting PocketSmith...</p>`;
+  if(p.step==='error')return`<p style="color:var(--rd);font-size:13px;line-height:1.6">${esc(p.err)}</p>
+    ${p.cors?`<div class="card" style="margin-top:12px"><p class="dim" style="font-size:12.5px;line-height:1.7">The browser refused the cross-origin call, which means PocketSmith's API does not allow direct browser requests. The fix is a tiny personal proxy - a free Cloudflare Worker that forwards requests and adds the CORS headers. Create a Worker with the code below, then paste its URL + /v2 into "API base URL" in the PocketSmith settings card and try again. Your developer key still only ever travels from your browser to YOUR worker to PocketSmith.</p>
+    <pre class="num" style="font-size:11px;line-height:1.5;background:var(--s2);padding:10px;border-radius:4px;overflow:auto;user-select:all">export default{async fetch(req){
+  const h={'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'x-developer-key,accept'};
+  if(req.method==='OPTIONS')return new Response(null,{headers:h});
+  const u=new URL(req.url);
+  const r=await fetch('https://api.pocketsmith.com'+u.pathname+u.search,{headers:{'X-Developer-Key':req.headers.get('x-developer-key')||'','Accept':'application/json'}});
+  const out=new Response(r.body,r);
+  for(const k in h)out.headers.set(k,h[k]);
+  return out;
+}}</pre></div>`:''}
+    <div class="modal-f" style="border:none;padding:14px 0 0"><button class="btn" data-action="modal-close">Close</button></div>`;
+  if(p.step==='map'){
+    const map=state.settings.psMap||{};
+    return`<p class="dim" style="font-size:12.5px;line-height:1.6;margin-bottom:12px">Link each PocketSmith account to its FinanceHub account. Leave an account unlinked to skip it. Balances shown are PocketSmith's current figures from the bank feed.</p>
+    <table class="fit"><thead><tr><th>PocketSmith account</th><th class="r">Feed balance</th><th style="width:240px">Imports into</th></tr></thead><tbody>
+    ${(p.accounts||[]).map(a=>`<tr><td>${esc(a.name||'')}<div class="dim" style="font-size:11px">${esc((a.institution&&a.institution.title)||'')} &middot; ${esc(a.type||'')}</div></td>
+      <td class="r num">${a.current_balance!=null?fmt(Math.round(a.current_balance*100)):'-'}</td>
+      <td><select data-psid="${a.id}">${'<option value="">- skip -</option>'+activeAccounts().filter(x=>!x.noTx).map(x=>`<option value="${x.id}" ${map[a.id]===x.id?'selected':''}>${esc(x.name)}</option>`).join('')}</select></td></tr>`).join('')}
+    </tbody></table>
+    <div class="frow" style="margin-top:12px"><label class="f"><span class="fl">Pull transactions from</span><input type="date" id="ps-since" value="${state.settings.psSince||addDays(todayISO(),-30)}"></label><div></div></div>
+    <div class="modal-f" style="border:none;padding:14px 0 0"><button class="btn" data-action="modal-close">Cancel</button><span style="flex:1"></span><button class="btn primary" data-action="ps-fetch">Fetch transactions &rarr;</button></div>`;
+  }
+  // preview
+  const byAcct={};for(const r of p.rows||[]){(byAcct[r.accountId]=byAcct[r.accountId]||[]).push(r)}
+  let add=0,dupes=0,near=0;const previewRows=[];
+  const seenPs=new Set(state.transactions.map(t=>t.psId).filter(Boolean));
+  for(const accountId in byAcct){
+    for(const c of aiClassify(byAcct[accountId],accountId)){
+      const cls=seenPs.has(c.psId)?'dupe':c.cls;
+      if(cls==='dupe')dupes++;else if(cls==='near')near++;else add++;
+      previewRows.push(Object.assign({},c,{cls}));
+    }
+  }
+  previewRows.sort((a,b)=>a.date<b.date?1:-1);
+  return`<div class="grid g4" style="margin-bottom:14px">
+    ${statCard('Will import',String(add),'pos','new')}
+    ${statCard('Already here',String(dupes),dupes?'acc':'','matched by id or hash')}
+    ${statCard('Possible duplicates',String(near),near?'acc':'','same date + amount (e.g. an old CSV import)')}
+    ${statCard('From',fmtD(state.settings.psSince||''),'','feed start date')}
+  </div>
+  ${near?`<label class="chk" style="margin-bottom:8px"><input type="checkbox" id="ps-near"> Import the ${near} possible duplicates anyway</label>`:''}
+  <label class="chk" style="margin-bottom:10px"><input type="checkbox" id="ps-bal" checked> Also update account balances from the feed (writes balance history)</label>
+  <div class="csv-prev" style="max-height:280px;overflow:auto"><table><thead><tr><th>Date</th><th>Payee</th><th>Account</th><th class="r">Amount</th><th></th></tr></thead><tbody>
+  ${previewRows.slice(0,50).map(r=>`<tr style="${r.cls!=='new'?'opacity:.5':''}"><td class="num">${fmtD(r.date)}</td><td>${esc(r.desc)}${r.cls==='near'?`<div class="dim" style="font-size:10.5px">matches existing: ${esc(r.like||'')}</div>`:''}</td><td class="mut">${esc(acctName(r.accountId))}</td><td class="r ${r.amount>=0?'pos':''}">${fmtS(r.amount)}</td><td>${r.cls==='dupe'?'<span class="badge">HERE</span>':r.cls==='near'?'<span class="badge am">POSSIBLE DUPE</span>':''}</td></tr>`).join('')}
+  </tbody></table></div>
+  ${previewRows.length>50?`<p class="dim" style="font-size:11.5px;margin-top:6px">Showing newest 50 of ${previewRows.length}</p>`:''}
+  <div class="modal-f" style="border:none;padding:14px 0 0"><button class="btn" data-action="modal-close">Cancel</button><span style="flex:1"></span><button class="btn primary" data-action="ps-commit" ${!add&&!near?'disabled':''}>Import</button></div>`;
 }
 function aiImpHtml(){
   const w2=ui.aiimp;
@@ -4259,11 +4320,11 @@ const SYNC={
   payload(){
     // tokens never leave this device - each device keeps its own keys
     const s=JSON.parse(JSON.stringify(state));
-    s.settings.ghToken='';s.settings.apiKey='';
+    s.settings.ghToken='';s.settings.apiKey='';s.settings.psKey='';
     return JSON.stringify(s);
   },
   adopt(remote){
-    const keep={ghToken:state.settings.ghToken,gistId:state.settings.gistId,apiKey:state.settings.apiKey};
+    const keep={ghToken:state.settings.ghToken,gistId:state.settings.gistId,apiKey:state.settings.apiKey,psKey:state.settings.psKey,psBase:state.settings.psBase};
     state=Object.assign(emptyState(),remote);
     state.settings=Object.assign(emptyState().settings,state.settings,keep);
     reconcileDebtBalances();
@@ -4373,7 +4434,7 @@ document.addEventListener('visibilitychange',()=>{
 const BACKUP={
   RX:/^financehub-backup-(\d{4}-\d{2}(?:-\d{2})?)(?:-manual)?\.json$/,
   log(){return Array.isArray(state.backupLog)?state.backupLog:(state.backupLog=[])},
-  payload(){const s=JSON.parse(JSON.stringify(state));s.settings.apiKey='';s.settings.ghToken='';return JSON.stringify(s,null,1)},
+  payload(){const s=JSON.parse(JSON.stringify(state));s.settings.apiKey='';s.settings.ghToken='';s.settings.psKey='';return JSON.stringify(s,null,1)},
   last(mode){const l=BACKUP.log().filter(b=>!mode||b.mode===mode);return l.length?l[l.length-1]:null},
   record(mode,size,extra){BACKUP.log().push(Object.assign({date:todayISO(),ts:new Date().toISOString(),mode,size},extra||{}));state.backupLog=BACKUP.log().slice(-60)},
   /* is a FILE backup due under the cadence? cloud copies never satisfy this -
@@ -4626,7 +4687,119 @@ function aiImportPreview(rows,accountId){
   const cl=aiClassify(rows,accountId);
   return{add:cl.filter(r=>r.cls==='new').length,dupes:cl.filter(r=>r.cls==='dupe').length,near:cl.filter(r=>r.cls==='near').length,ruled:rows.filter(p=>ENGINE.applyRules(p.desc)).length,rows:cl};
 }
+/* ================================================================
+   SECTION: POCKETSMITH (user's own developer key, bank-feed pull)
+   - transactions and balances pulled on demand, never pushed
+   - key stored like the other keys: this device only, stripped from
+     sync payloads and backups
+   - psBase lets a CORS proxy (e.g. a Cloudflare Worker) stand in if
+     the API refuses browser calls
+   ================================================================ */
+const PS={
+  base(){return (state.settings.psBase||'https://api.pocketsmith.com/v2').replace(/\/$/,'')},
+  async call(path){
+    const res=await fetch(PS.base()+path,{headers:{'X-Developer-Key':state.settings.psKey,'Accept':'application/json'}});
+    if(!res.ok){let m='PocketSmith said '+res.status;try{const j=await res.json();m+=': '+(j.error||'')}catch(e){}
+      if(res.status===401||res.status===403)m+=' - check the developer key';
+      throw new Error(m)}
+    return res.json();
+  },
+  async me(){const u=await PS.call('/me');state.settings.psUserId=u.id;return u},
+  async accounts(){
+    if(!state.settings.psUserId)await PS.me();
+    return PS.call('/users/'+state.settings.psUserId+'/transaction_accounts');
+  },
+  async transactions(psId,since){
+    const out=[];let page=1;
+    while(page<=20){
+      const batch=await PS.call('/transaction_accounts/'+psId+'/transactions?start_date='+since+'&per_page=100&page='+page);
+      out.push(...batch);
+      if(batch.length<100)break;
+      page++;
+    }
+    return out;
+  },
+  // PS transaction -> import row (amount float dollars, negative = debit)
+  row(t){return{date:String(t.date).slice(0,10),desc:String(t.payee||t.original_payee||'').trim()||'(no payee)',amount:Math.round((t.amount||0)*100),psId:t.id}},
+  corsHelp(e){
+    return /failed to fetch|networkerror|load failed/i.test(String(e&&e.message||e));
+  }
+};
+
 Object.assign(ACTIONS,{
+  'ps-pull':async el=>{
+    if(!state.settings.psKey){setView('settings');return toast('Add your PocketSmith developer key in Settings first')}
+    ui.ps={step:'loading',err:''};
+    MODAL.open({title:'PocketSmith Sync',wide:true,footer:false,body:psHtml()});
+    try{
+      ui.ps.accounts=await PS.accounts();
+      ui.ps.step='map';
+    }catch(e){ui.ps.step='error';ui.ps.err=String(e.message||e);ui.ps.cors=PS.corsHelp(e)}
+    const mb=$('#modal-layer .modal-b');if(mb)mb.innerHTML=psHtml();
+  },
+  'ps-map-set':()=>{},
+  'ps-fetch':async el=>{
+    const map={};
+    $$('#modal-layer [data-psid]').forEach(s=>{if(s.value)map[s.dataset.psid]=s.value});
+    if(!Object.keys(map).length)return toast('Link at least one PocketSmith account to a FinanceHub account');
+    state.settings.psMap=map;
+    const since=$('#ps-since').value||addDays(todayISO(),-30);
+    state.settings.psSince=since;
+    save();
+    el.disabled=true;el.textContent='Fetching...';
+    try{
+      const rows=[];
+      for(const psId in map){
+        const txs=await PS.transactions(psId,since);
+        for(const t of txs)rows.push(Object.assign(PS.row(t),{accountId:map[psId],psAcct:psId}));
+      }
+      ui.ps.rows=rows;ui.ps.step='preview';
+    }catch(e){ui.ps.step='error';ui.ps.err=String(e.message||e);ui.ps.cors=PS.corsHelp(e)}
+    const mb=$('#modal-layer .modal-b');if(mb)mb.innerHTML=psHtml();
+  },
+  'ps-commit':()=>{
+    const includeNear=!!$('#ps-near')?.checked;
+    const updBal=!!$('#ps-bal')?.checked;
+    const seenPs=new Set(state.transactions.map(t=>t.psId).filter(Boolean));
+    let added=0,dupes=0,nearSkipped=0;
+    // classify per destination account (same engine as AI import)
+    const byAcct={};
+    for(const r of ui.ps.rows){(byAcct[r.accountId]=byAcct[r.accountId]||[]).push(r)}
+    for(const accountId in byAcct){
+      const cl=aiClassify(byAcct[accountId],accountId);
+      const hashFor=wizHashes();
+      for(const p of cl){
+        const hsh=hashFor(p);
+        if(seenPs.has(p.psId)||p.cls==='dupe'){dupes++;continue}
+        if(p.cls==='near'&&!includeNear){nearSkipped++;continue}
+        state.transactions.push({id:uid(),date:p.date,accountId,payee:p.desc,categoryId:ENGINE.applyRules(p.desc),amount:p.amount,notes:'',tags:[],hash:hsh,psId:p.psId});
+        added++;
+      }
+    }
+    let balN=0;
+    if(updBal&&ui.ps.accounts){
+      for(const psId in (state.settings.psMap||{})){
+        const pa=ui.ps.accounts.find(a=>String(a.id)===String(psId));
+        const la=byId(state.accounts,state.settings.psMap[psId]);
+        if(!pa||!la||pa.current_balance==null)continue;
+        const cents=Math.round(pa.current_balance*100);
+        la.balance=acctType(la).asset?cents:-Math.abs(cents);
+        pushBalanceHistory(la);balN++;
+      }
+      reconcileDebtBalances();
+    }
+    state.settings.psLastPull=todayISO();
+    ENGINE.syncDebtBills();
+    const adv=ENGINE.autoAdvanceBills();
+    MODAL.close();save();render();
+    toast(`PocketSmith: ${added} imported (${dupes} dupes, ${nearSkipped} possible dupes skipped)${balN?` - ${balN} balance${balN>1?'s':''} updated`:''}${adv?` - ${adv} bills advanced`:''}`);
+  },
+  'ps-test':async el=>{
+    el.disabled=true;el.textContent='Testing...';
+    try{const u=await PS.me();save();toast('Connected as '+(u.login||u.name||('user '+u.id)))}
+    catch(e){toast(PS.corsHelp(e)?'Browser blocked the call (CORS) - see the proxy note under the key field':String(e.message||e))}
+    el.disabled=false;el.textContent='Test connection';
+  },
   'ai-import':()=>{
     if(!state.settings.apiKey){setView('settings');return toast('Add your Anthropic API key in Settings first')}
     ui.aiimp={rows:null,accountId:ui.txFilter.account||activeAccounts()[0]?.id||''};
