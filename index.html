@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-10-23.1';
+const BUILD='2026-10-23.2';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -851,7 +851,23 @@ const ENGINE={
     }));
   },
   freqMonthly(amount,freq){return Math.round(amount*({weekly:52,fortnightly:26,monthly:12,annually:1}[freq]||12)/12)},
-  incomeMonthly(){return sum(state.incomes.map(i=>ENGINE.freqMonthly(i.amount,i.freq)))},
+  /* an income's amount on a given date: the scheduled change applies from its
+     effective date, so a pay rise entered today is a forecast until it lands
+     and the live figure after - no editing required on the day */
+  incomeAmountAt(inc,iso){
+    if(inc.change&&inc.change.date&&inc.change.amount&&iso>=inc.change.date)return inc.change.amount;
+    return inc.amount;
+  },
+  incomeMonthly(at){const iso=at||todayISO();return sum(state.incomes.map(i=>ENGINE.freqMonthly(ENGINE.incomeAmountAt(i,iso),i.freq)))},
+  /* earliest future income change: {date, monthlyNow, monthlyThen, delta} or null */
+  incomeNext(){
+    const today=todayISO();
+    const future=state.incomes.filter(i=>i.change&&i.change.date&&i.change.amount&&i.change.date>today).map(i=>i.change.date).sort();
+    if(!future.length)return null;
+    const date=future[0];
+    const now=ENGINE.incomeMonthly(today),then=ENGINE.incomeMonthly(date);
+    return{date,monthlyNow:now,monthlyThen:then,delta:then-now};
+  },
   billsMonthly(){return Math.round(ENGINE.billsSummary().final*52/12)},
   /* Pay Split's bills line: commitments only - the living allowances inside
      the transfer are reported on the living-spend line instead */
@@ -2288,7 +2304,9 @@ VIEWS.bills=()=>{
     ${(()=>{const incWk=Math.round(ENGINE.incomeMonthly()*12/52);
       if(!incWk)return '';
       const left=incWk-Math.round(s.final);
-      return`<div class="alt"><div class="l">Left after transfer</div><div class="v" style="color:${left<0?'var(--rd)':'var(--gn)'}">${fmtS(left)}</div></div>`})()}
+      const nx=ENGINE.incomeNext();
+      const nxLine=nx?`<div class="dim" style="font-size:10px;margin-top:2px;color:var(--gn)">from ${fmtD(nx.date)}: ${fmtS(Math.round(nx.monthlyThen*12/52)-Math.round(s.final))}</div>`:'';
+      return`<div class="alt"><div class="l">Left after transfer</div><div class="v" style="color:${left<0?'var(--rd)':'var(--gn)'}">${fmtS(left)}</div>${nxLine}</div>`})()}
     ${s.excluded?`<div class="alt"><div class="l">Excluded</div><div class="v" style="color:var(--am)">${s.excluded} bill${s.excluded>1?'s':''}</div></div>`:''}
     <div class="alt" style="min-width:200px">
       <div class="l">Buffer %</div>
@@ -2727,12 +2745,15 @@ VIEWS.paysplit=()=>{
   // incomes table
   h+=`<div class="card" style="margin-bottom:14px"><h3>Income Sources</h3><table class="fit"><thead><tr><th>Source</th><th>Frequency</th><th class="r">Amount</th><th class="r">Monthly</th><th class="r">Per ${per[1]}</th><th></th></tr></thead><tbody>`;
   for(const inc of state.incomes){
-    const mo=ENGINE.freqMonthly(inc.amount,inc.freq);
-    h+=`<tr><td>${esc(inc.name)}</td><td class="mut">${esc(inc.freq)}</td><td class="r">${fmt(inc.amount)}</td><td class="r">${fmt(mo)}</td><td class="r">${fmt(cv(mo))}</td>
+    const cur=ENGINE.incomeAmountAt(inc,todayISO());
+    const mo=ENGINE.freqMonthly(cur,inc.freq);
+    const pending=inc.change&&inc.change.date&&inc.change.date>todayISO()?inc.change:null;
+    h+=`<tr><td>${esc(inc.name)}${pending?`<div class="dim" style="font-size:11px;color:var(--gn)">from ${fmtD(pending.date)}: ${fmt(pending.amount)} ${esc(inc.freq)} (${pending.amount>=cur?'+':''}${fmt(pending.amount-cur)})</div>`:''}</td><td class="mut">${esc(inc.freq)}</td><td class="r">${fmt(cur)}</td><td class="r">${fmt(mo)}</td><td class="r">${fmt(cv(mo))}</td>
       <td class="r"><span class="row-act"><button class="iconbtn" data-action="income-edit" data-id="${inc.id}">&#9998;</button><button class="iconbtn del" data-action="income-del" data-id="${inc.id}">&#10005;</button></span></td></tr>`;
   }
   const ps=ENGINE.paySplit();
-  h+=`<tr style="border-top:2px solid var(--bd)"><td colspan="2"><b>Total income</b></td><td></td><td class="r"><b>${fmt(ps.income)}</b></td><td class="r"><b>${fmt(cv(ps.income))}</b></td><td></td></tr></tbody></table></div>`;
+  h+=`<tr style="border-top:2px solid var(--bd)"><td colspan="2"><b>Total income</b></td><td></td><td class="r"><b>${fmt(ps.income)}</b></td><td class="r"><b>${fmt(cv(ps.income))}</b></td><td></td></tr></tbody></table>
+  ${(nx=>nx?`<p style="font-size:12px;margin-top:8px;font-family:var(--mono);color:var(--gn)">From ${fmtD(nx.date)}: income ${fmt(cv(nx.monthlyThen))}/${per[1]} (${nx.delta>=0?'+':''}${fmt(cv(nx.delta))}) &rarr; surplus becomes ${fmtS(cv((ps.surplus||0)+nx.delta))}/${per[1]} with today's bills and spend.</p>`:'')(ENGINE.incomeNext())}</div>`;
   // waterfall
   const segs=[
     {n:'Bills transfer',v:ps.bills,c:CONFIG.colors.bl,note:'true weekly cost of every bill incl. buffer/rounding'},
@@ -2808,7 +2829,11 @@ function incomeForm(inc={}){
     <label class="f"><span class="fl">Frequency</span><select name="freq">${[['weekly','Weekly'],['fortnightly','Fortnightly'],['monthly','Monthly'],['annually','Annually']].map(([v,n])=>`<option value="${v}" ${inc.freq===v?'selected':''}>${n}</option>`).join('')}</select></label>
     <label class="f"><span class="fl">Paid into</span><select name="accountId">${acctOptions(inc.accountId)}</select></label>
   </div>
-  <p class="dim" style="font-size:12px">Use take-home (after tax) amounts. For irregular income like business drawings, enter a conservative monthly average.</p>`;
+  <div class="frow" style="margin-top:4px">
+    <label class="f"><span class="fl">Scheduled change: new amount $ (optional)</span><input name="changeAmount" value="${inc.change&&inc.change.amount?(inc.change.amount/100).toFixed(2):''}" inputmode="decimal" placeholder="e.g. your pay after the rise"></label>
+    <label class="f"><span class="fl">Takes effect from</span><input type="date" name="changeDate" value="${inc.change&&inc.change.date?inc.change.date:''}"></label>
+  </div>
+  <p class="dim" style="font-size:12px">Use take-home (after tax) amounts. A scheduled change is a forecast until its date, then becomes the live figure automatically - Pay Split, Left after transfer and surplus-driven payoff scenarios all switch over on the day. Once it has taken effect, the new amount moves into the main Amount field on the next edit.</p>`;
 }
 function consolCard(){
   let h='';
@@ -3629,9 +3654,14 @@ ${JSON.stringify(reviewSummary())}`;
     if(!v.name.trim())return toast('Source name is required');
     if(!cents(v.amount))return toast('Amount is required');
     const rec={name:v.name.trim(),amount:Math.abs(cents(v.amount)),freq:v.freq,accountId:v.accountId};
+    const ca=cents(v.changeAmount),cd=v.changeDate||'';
+    if(ca&&cd){
+      if(cd<=todayISO()){rec.amount=Math.abs(ca);rec.change=null} // already effective - fold in
+      else rec.change={amount:Math.abs(ca),date:cd};
+    }else rec.change=null;
     if(ui.editing)Object.assign(byId(state.incomes,ui.editing),rec);
     else state.incomes.push({id:uid(),...rec});
-    MODAL.close();save();render();toast('Income saved');
+    MODAL.close();save();render();toast(rec.change?`Income saved - ${fmt(rec.change.amount)} from ${fmtD(rec.change.date)}`:'Income saved');
   },
   'income-del':async el=>{
     const inc=byId(state.incomes,el.dataset.id);
