@@ -263,7 +263,7 @@ svg .fade{animation:fin .7s}
 /* ================================================================
    SECTION: CONFIG
    ================================================================ */
-const BUILD='2026-09-17.16';
+const BUILD='2026-10-23.1';
 const CONFIG = {
   dbName:'financehub', dbStore:'app', dbKey:'state',
   colors:{or:'#f97316',gn:'#22c55e',rd:'#ef4444',bl:'#3b82f6',am:'#f59e0b',tx2:'#9a9a9a'},
@@ -409,7 +409,7 @@ function defaultCategories(){
 }
 const emptyState=()=>({
   ver:1, view:'dashboard',
-  settings:{payCycle:'fortnightly',billsAccountId:'',billsBuffer:0,billsRound:0,firstRun:true,textScale:100,apiKey:'',ghToken:'',gistId:'',backupCadence:'monthly',backupSnooze:'',cloudArchive:true,cloudKeep:12,backupGistId:'',alloc:{debt:70,goals:20,keep:10},spendMode:'auto',spendManual:0,spendMonths:3},
+  settings:{payCycle:'fortnightly',billsAccountId:'',billsBuffer:0,billsRound:0,firstRun:true,textScale:100,apiKey:'',ghToken:'',gistId:'',backupCadence:'monthly',backupSnooze:'',cloudArchive:true,cloudKeep:12,backupGistId:'',alloc:{debt:70,goals:20,keep:10},spendMode:'auto',spendManual:0,spendMonths:3,driftPc:10},
   accounts:[],transactions:[],categories:defaultCategories(),rules:[],recurring:[],incomes:[],
   bills:[],budgets:{},debts:[],scenarios:[],goals:[],snapshots:[],consol:{debtIds:[],rate:9,years:5,fees:0},syncMeta:{rev:0,ts:'',device:''},backupLog:[]
 });
@@ -474,9 +474,12 @@ function billMetaLine(b){
   if(b.kind==='living'){const wn=allowanceWindow(b),sp=allowanceSpentThisMonth(b);const over=sp>wn.allowed;return{t:`Spent ${fmt(sp)} of ${fmt(wn.allowed)} ${wn.label}${over?` &middot; ${fmt(sp-wn.allowed)} over`:''}`,c:over?'var(--am)':'var(--tx3)'}}
   if(b.freq==='schedule'){const r=ENGINE.scheduleRemaining(b);return b.scheduleDone?{t:'All instalments paid',c:'var(--gn)'}:{t:`${r.count} of ${r.of} instalment${r.of===1?'':'s'} left &middot; ${fmt(r.total)} to go`,c:'var(--tx3)'}}
   const dr=ENGINE.billDrift(b);
-  if(dr){const off=Math.abs(dr.pc)>10;
-    if(dr.rate)return{t:`Actuals ${fmt(dr.avg)} per ${billFreqLabel(b).toLowerCase().replace(/^every /,'')}${off?` &middot; ${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered`:''} &middot; paid as ${dr.n} debits`,c:off?'var(--am)':'var(--tx3)',title:'Smoothing plan: no single debit matches the registered amount, so this compares the total matched over the last two cycles against the registered amount per cycle'};
-    return{t:`Actuals avg ${fmt(dr.avg)}${off?` &middot; ${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered`:''}`,c:off?'var(--am)':'var(--tx3)',title:off?'Update the amount so the weekly transfer matches what is really coming out':''}}
+  if(dr){const off=Math.abs(dr.pc)>clamp(state.settings.driftPc||10,1,90);
+    const sug=ENGINE.billSuggest(b);
+    const btn=sug?` <button class="btn sm" data-action="bill-apply-actual" data-id="${b.id}" style="min-height:0;padding:1px 8px;font-size:10.5px;margin-left:6px;vertical-align:1px;${sug.dir==='down'?'border-color:var(--gn);color:var(--gn)':''}" title="${sug.dir==='up'?`Raise the registered amount to the ${sug.basis==='year'?'12-month':'actuals'} average - adds ${fmt(Math.abs(sug.wkDelta))}/wk to the transfer so this bill stops underfunding`:`Lower to the ${sug.basis==='year'?'12-month average (covers the full seasonal cycle)':'recent average (3 consistent payments)'} - releases ${fmt(Math.abs(sug.wkDelta))}/wk back to your Pay Split surplus`}">Apply ${fmt(sug.apply)}${sug.dir==='down'?` &middot; +${fmt(Math.abs(sug.wkDelta))}/wk back`:''}</button>`:'';
+    const col=sug?(sug.dir==='down'?'var(--gn)':'var(--am)'):(off?'var(--am)':'var(--tx3)');
+    if(dr.rate)return{t:`Actuals ${fmt(dr.avg)} per ${billFreqLabel(b).toLowerCase().replace(/^every /,'')}${off?` &middot; ${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered`:''} &middot; paid as ${dr.n} debits${btn}`,c:col,title:'Smoothing plan: no single debit matches the registered amount, so this compares the total matched over the last two cycles against the registered amount per cycle'};
+    return{t:`Actuals avg ${fmt(dr.avg)}${off?` &middot; ${dr.pc>0?'+':''}${dr.pc.toFixed(0)}% vs registered`:''}${btn}`,c:col,title:off&&!sug?'Drifting, but not enough consistent history yet to suggest a new amount':''}}
   // one match is not enough for a drift average, but it is a match
   const lp=ENGINE.billLastPaid(b);
   if(lp)return{t:`1 payment matched &middot; ${fmt(lp.total)} on ${fmtD(lp.date)}`,c:'var(--tx3)',title:'The actuals average appears once two payments have matched'};
@@ -672,11 +675,15 @@ const ENGINE={
     // 3. debt minimum vs what is actually paid
     for(const d of debts){
       const ps=ENGINE.debtPayStats(d);
-      if(ps.count>=2&&d.minAmount){const min=Math.round(ENGINE.minMonthly(d));const avg=Math.round(ps.avgMo||0);if(avg&&Math.abs(avg-min)/min>0.03)add('med','Debts',`${d.name} minimum is ${fmt(min)}/mo but actuals average ${fmt(avg)}/mo`,`Update the minimum on the debt so Pay Split and the Payoff Planner use the real repayment${d.viaBills?' - the AUTO bill follows it':''}.`,'debts',1)}
+      if(ps.count>=2&&d.minAmount){const min=Math.round(ENGINE.minMonthly(d));const avg=Math.round(ps.avgMo||0);if(avg&&Math.abs(avg-min)/min>0.03)out.push({sev:'med',area:'Debts',title:`${d.name} minimum is ${fmt(min)}/mo but actuals average ${fmt(avg)}/mo`,detail:`Update the minimum on the debt so Pay Split and the Payoff Planner use the real repayment${d.viaBills?' - the AUTO bill follows it':''}.`,view:'debts',count:1,ids:null,debtId:d.id,applyMo:avg})}
     }
     // 4. bills drifting
-    const drift=act.map(b=>({b,dr:ENGINE.billDrift(b)})).filter(x=>x.dr&&Math.abs(x.dr.pc)>10);
-    if(drift.length)add('med','Bills','Registered amounts out of step with actuals',drift.map(x=>`${x.b.name} ${x.dr.pc>0?'+':''}${x.dr.pc.toFixed(0)}% (avg ${fmt(x.dr.avg)})`).join('; ')+'. Fix the amounts so the weekly transfer is right.','bills',drift.length,drift.map(x=>x.b.id));
+    {const sugs=act.map(b=>({b,s:ENGINE.billSuggest(b)})).filter(x=>x.s);
+     const up=sugs.filter(x=>x.s.dir==='up'),down=sugs.filter(x=>x.s.dir==='down');
+     if(up.length)out.push({sev:'med',area:'Bills',title:'Registered amounts below what is really coming out',detail:up.map(x=>`${x.b.name} +${x.s.pc.toFixed(0)}% (apply ${fmt(x.s.apply)})`).join('; ')+`. Applying raises the weekly transfer by ${fmt(sum(up.map(x=>Math.abs(x.s.wkDelta))))}/wk so the bills account stops running short.`,view:'bills',count:up.length,ids:up.map(x=>x.b.id),applyDir:'up'});
+     if(down.length)out.push({sev:'low',area:'Bills',title:`Money back in the pool - ${down.length} bill${down.length>1?'s':''} registered above real cost`,detail:down.map(x=>`${x.b.name} ${x.s.pc.toFixed(0)}% (${x.s.basis==='year'?'12-mo avg':'avg'} ${fmt(x.s.apply)})`).join('; ')+`. Applying releases ${fmt(sum(down.map(x=>Math.abs(x.s.wkDelta))))}/wk from the transfer back to your Pay Split surplus. Seasonal bills only suggest this off a full year of history.`,view:'bills',count:down.length,ids:down.map(x=>x.b.id),applyDir:'down'});
+     const near=act.map(b=>({b,dr:ENGINE.billDrift(b)})).filter(x=>x.dr&&Math.abs(x.dr.pc)>clamp(state.settings.driftPc||10,1,90)&&!ENGINE.billSuggest(x.b)&&!x.b.autoFrom&&x.b.kind!=='living');
+     if(near.length)add('low','Bills','Drifting, but not enough history to auto-fix',near.map(x=>`${x.b.name} ${x.dr.pc>0?'+':''}${x.dr.pc.toFixed(0)}%`).join('; ')+'. Underspend suggestions need a full seasonal year (utilities) or 3 consistent payments - until then, review these by hand.','bills',near.length,near.map(x=>x.b.id));}
     // 5. bills with no keyword
     const nokw=act.filter(b=>!(b.matchKeyword||'').trim()&&!b.autoFrom&&b.freq!=='schedule'||(b.freq==='schedule'&&!(b.matchKeyword||'').trim()));
     if(nokw.length)add('low','Bills',`${nokw.length} bill${nokw.length>1?'s have':' has'} no match keyword`,`${nokw.map(b=>b.name).join(', ')}. Without one, Last paid stays blank and the due date only moves when you press Paid.`,'bills',nokw.length,nokw.map(b=>b.id));
@@ -685,6 +692,9 @@ const ENGINE={
     if(stale.length)add('med','Bills',`${stale.length} bill${stale.length>1?'s':''} overdue by more than two weeks`,`${stale.map(b=>`${b.name} (${fmtD(b.nextDue)})`).join(', ')}. Either the payment has not been imported, the keyword does not match the bank description, or the bill was cancelled - fix or press Paid.`,'bills',stale.length,stale.map(b=>b.id));
     // 7. bills account not set
     if(!billsAccountIds().length)add('med','Settings','No bills account selected','The 12-week projection and the transfer health check need to know which account the weekly transfer goes into. Settings > Bills account.','settings',1);
+    // 7b. provably spare money idle in the bills account
+    if(billsAccountIds().length){const proj=ENGINE.billsProjection(12);const spare=proj.opening-proj.minFloat;
+      if(!proj.shortfalls.length&&spare>=50000)add('low','Bills',`Bills account holds ${fmt(spare)} above its required float`,`The 12-week projection needs ${fmt(proj.minFloat)} of opening float; the account holds ${fmt(proj.opening)}. The difference is provably spare whatever the registered amounts say - sweep it to the offset or a debt and every bill still clears.`,'bills',1);}
     // 8. no income
     if(!state.incomes.length)add('high','Pay Split','No income entered','Pay Split cannot compute a surplus without at least one income source.','paysplit',1);
     // 9. uncategorised recent transactions
@@ -1053,6 +1063,51 @@ const ENGINE={
     const perCycle=Math.round(sum(win.map(p=>Math.abs(p.amount)))*cyc/span);
     const pc=(perCycle-b.amount)/b.amount*100;
     return{avg:perCycle,pc,n:win.length,last:{date:win[0].date,total:Math.abs(win[0].amount)},rate:true};
+  },
+  /* everything the keyword matched in the last 12 months, expressed per
+     billing cycle - the seasonal-safe average (covers winter AND summer) */
+  billYearAvg(b){
+    const today=todayISO(),start=addDays(today,-365);
+    const pays=ENGINE.billPayments(b).filter(p=>Math.abs(p.amount)<=b.amount*3&&p.date>=start);
+    if(pays.length<2)return null;
+    const spanDays=daysBetween(pays[pays.length-1].date,today); // pays desc: last = oldest
+    if(spanDays<=0)return null;
+    const perCycle=Math.round(sum(pays.map(p=>Math.abs(p.amount)))*ENGINE.billCycleDays(b)/spanDays);
+    return{avg:perCycle,spanDays,n:pays.length};
+  },
+  /* Two-way amount suggestion, gated by settings.driftPc.
+     UP (actuals above registered) trusts the recent average - underfunding is
+     the dangerous direction, so it applies readily.
+     DOWN (actuals below registered) must prove itself: seasonal bills
+     (Utilities, or cycles of 8+ weeks) need ~a full year of history so a cheap
+     summer can never starve winter; flat bills need 3 consistent recent events.
+     AUTO debt bills, living allowances and instalment schedules never suggest. */
+  billSuggest(b){
+    if(b.autoFrom||b.kind==='living'||b.freq==='schedule'||b.active===false||!b.amount)return null;
+    const th=clamp(state.settings.driftPc||10,1,90);
+    const dr=ENGINE.billDrift(b);
+    if(!dr)return null;
+    const wk=amt=>ENGINE.billWeekly(Object.assign({},b,{amount:amt}));
+    if(dr.pc>th){
+      return{dir:'up',apply:dr.avg,pc:dr.pc,basis:dr.rate?'rate':'recent',wkDelta:Math.round(wk(dr.avg)-wk(b.amount))};
+    }
+    if(dr.pc<-th){
+      const c=byId(state.categories,b.categoryId);
+      const seasonal=(c&&c.group==='Utilities')||ENGINE.billCycleDays(b)>=56;
+      if(seasonal){
+        const y=ENGINE.billYearAvg(b);
+        if(!y||y.spanDays<300)return null;             // not a full season cycle yet
+        if(y.avg>=b.amount*(1-th/100))return null;     // the year average says it is fine
+        return{dir:'down',apply:y.avg,pc:(y.avg-b.amount)/b.amount*100,basis:'year',wkDelta:Math.round(wk(y.avg)-wk(b.amount))};
+      }
+      if(dr.rate||dr.n<3)return null;                  // flat bill: 3 events minimum
+      const evs=ENGINE.billPaymentEvents(b).filter(e=>e.total>=b.amount*0.5&&e.total<=b.amount*2).slice(0,3);
+      if(evs.length<3)return null;
+      const tot=evs.map(e=>e.total),mx=Math.max(...tot),mn=Math.min(...tot);
+      if((mx-mn)>0.15*dr.avg)return null;              // events disagree - not a trend
+      return{dir:'down',apply:dr.avg,pc:dr.pc,basis:'recent',wkDelta:Math.round(wk(dr.avg)-wk(b.amount))};
+    }
+    return null;
   },
   autoAdvanceBills(){
     // a matched payment near the due date marks the bill paid automatically.
@@ -2171,7 +2226,7 @@ VIEWS.review=()=>{
   if(!issues.length)h+=`<div style="padding:18px;text-align:center;color:var(--gn);font-family:var(--mono)">&#10003; Nothing to flag. Bills, debts, transfers and categories all agree with each other.</div>`;
   else{
     h+='<table><thead><tr><th style="width:70px"></th><th style="width:110px">Area</th><th>Finding</th><th style="width:90px"></th></tr></thead><tbody>';
-    for(const [idx,i] of issues.entries())h+=`<tr><td>${sevBadge(i.sev)}</td><td class="mut">${esc(i.area)}</td><td><div style="font-weight:600">${esc(i.title)}</div><div class="dim" style="font-size:12px;line-height:1.55;margin-top:2px">${i.detail}</div></td><td><button class="btn sm" data-action="${i.ids&&i.ids.length?'review-go':'nav'}" data-view="${i.view}" data-i="${idx}" title="${i.ids&&i.ids.length?'Open '+i.view+' filtered to just these '+i.ids.length+' rows':''}">Go${i.ids&&i.ids.length?' ('+i.ids.length+')':''} &rarr;</button></td></tr>`;
+    for(const [idx,i] of issues.entries())h+=`<tr><td>${sevBadge(i.sev)}</td><td class="mut">${esc(i.area)}</td><td><div style="font-weight:600">${esc(i.title)}</div><div class="dim" style="font-size:12px;line-height:1.55;margin-top:2px">${i.detail}</div></td><td style="white-space:nowrap">${i.applyDir?`<button class="btn sm ${i.applyDir==='down'?'':'primary'}" data-action="review-apply-drift" data-dir="${i.applyDir}" style="margin-right:4px;${i.applyDir==='down'?'border-color:var(--gn);color:var(--gn)':''}" title="${i.applyDir==='up'?'Set every listed bill to its actuals average':'Lower every listed bill to its proven average and release the difference to your surplus'}">Apply all</button>`:''}${i.debtId?`<button class="btn sm primary" data-action="review-apply-debtmin" data-id="${i.debtId}" style="margin-right:4px" title="Set the minimum to the observed repayment${i.applyMo?' ('+fmt(i.applyMo)+'/mo)':''}">Apply</button>`:''}<button class="btn sm" data-action="${i.ids&&i.ids.length?'review-go':'nav'}" data-view="${i.view}" data-i="${idx}" title="${i.ids&&i.ids.length?'Open '+i.view+' filtered to just these '+i.ids.length+' rows':''}">Go${i.ids&&i.ids.length?' ('+i.ids.length+')':''} &rarr;</button></td></tr>`;
     h+='</tbody></table>';
   }
   h+='</div>';
@@ -2268,7 +2323,7 @@ VIEWS.bills=()=>{
     h+=chart('bills-proj',el=>CH.line(el,{labels:proj.rows.map(r=>'W'+r.week),series:[{name:'Projected balance',color:proj.shortfalls.length?CONFIG.colors.rd:CONFIG.colors.gn,data:proj.rows.map(r=>r.bal)}],fillFirst:true,height:180}));
     if(proj.shortfalls.length)
       h+=`<div style="margin-top:10px;font-size:12.5px;color:var(--rd);font-family:var(--mono)">&#9888; Balance goes negative in week${proj.shortfalls.length>1?'s':''} ${proj.shortfalls.map(r=>r.week).join(', ')} (timing shortfall).<br><span style="color:var(--tx2)">Minimum opening float so a zero-start never dips below $0: <b class="acc">${fmt(proj.minFloat)}</b>. Current opening: ${fmt(proj.opening)}.</span></div>`;
-    else h+=`<div style="margin-top:10px;font-size:12.5px;color:var(--gn);font-family:var(--mono)">&#10003; No shortfall weeks. Min float needed from a zero start: ${fmt(proj.minFloat)} &middot; opening balance ${fmt(proj.opening)}.</div>`;
+    else h+=`<div style="margin-top:10px;font-size:12.5px;color:var(--gn);font-family:var(--mono)">&#10003; No shortfall weeks. Min float needed from a zero start: ${fmt(proj.minFloat)} &middot; opening balance ${fmt(proj.opening)}.${(sp=>sp>=10000?`<br><span style="color:var(--tx2)">Holding <b style="color:var(--gn)">${fmt(sp)}</b> above the required float - provably spare over the next 12 weeks, safe to sweep to the offset or a debt.</span>`:'')(proj.opening-proj.minFloat)}</div>`;
   }
   h+='</div>';
   // annual cost by category (left column, under health)
@@ -3054,6 +3109,8 @@ VIEWS.settings=()=>{
     <label class="f"><span class="fl">Default pay cycle</span><select data-change="set-paycycle" style="max-width:220px">${CONFIG.payFreqs.map(([v,n])=>`<option value="${v}" ${state.settings.payCycle===v?'selected':''}>${n}</option>`).join('')}</select></label>
     <label class="f"><span class="fl">Bills account</span><select data-change="bills-account" style="max-width:280px">${acctOptions(state.settings.billsAccountId)}</select></label>
     <p class="dim" style="font-size:12px;margin-bottom:10px">App build <span class="num">${BUILD}</span> - if a device shows an older build, force-reload it (close it from the app switcher and reopen, or pull down to refresh in Safari).</p>
+    <label class="f"><span class="fl">Drift threshold %</span><select data-change="drift-pc" style="max-width:280px">${[5,10,15,20,25].map(v=>`<option value="${v}" ${(state.settings.driftPc||10)===v?'selected':''}>${v}% - suggest a new amount past this drift</option>`).join('')}</select></label>
+    <p class="dim" style="font-size:11.5px;margin-top:-4px;margin-bottom:10px">Bills whose actual payments drift further than this from the registered amount get an Apply button - upward off recent actuals, downward only off a full seasonal year (or 3 consistent payments for flat bills).</p>
     <label class="f"><span class="fl">Text size</span><select data-change="text-scale" style="max-width:180px">${[[100,'Normal'],[110,'Large'],[125,'Extra large'],[140,'Maximum']].map(([v,n])=>`<option value="${v}" ${(state.settings.textScale||100)===v?'selected':''}>${n}</option>`).join('')}</select></label>
   </div>`;
   h+=`<div class="card"><h3>AI Categorisation</h3>
@@ -3372,6 +3429,32 @@ const ACTIONS={
     if(ui.editing){const bb=byId(state.bills,ui.editing);Object.assign(bb,rec);if(rec.freq!=='schedule')delete bb.schedule;if(rec.active&&bb.cancelled){delete bb.cancelled;delete bb.cancelledDate}if(bb.freq==='schedule')ENGINE.scheduleSync(bb)}
     else{const nb={id:uid(),...rec};if(nb.freq==='schedule')ENGINE.scheduleSync(nb);state.bills.push(nb)}
     MODAL.close();save();render();toast('Bill saved - weekly transfer updated');
+  },
+  'bill-apply-actual':el=>{
+    const b=byId(state.bills,el.dataset.id);if(!b)return;
+    const s=ENGINE.billSuggest(b);if(!s)return toast('Nothing to apply - the suggestion no longer holds');
+    const old=b.amount;b.amount=s.apply;
+    save();render();
+    toast(`${b.name}: ${fmt(old)} -> ${fmt(b.amount)} - weekly transfer ${s.wkDelta>0?'up':'down'} ${fmt(Math.abs(s.wkDelta))}/wk`);
+  },
+  'review-apply-drift':el=>{
+    const dir=el.dataset.dir;let n=0,delta=0;
+    for(const b of state.bills.filter(b=>b.active!==false)){
+      const s=ENGINE.billSuggest(b);
+      if(s&&s.dir===dir){b.amount=s.apply;n++;delta+=s.wkDelta}
+    }
+    if(!n)return toast('Nothing to apply');
+    save();render();
+    toast(`${n} bill amount${n>1?'s':''} set to actuals - weekly transfer ${delta>0?'+':'-'}${fmt(Math.abs(delta))}/wk${dir==='down'?' released to your surplus':''}`);
+  },
+  'review-apply-debtmin':el=>{
+    const d=byId(state.debts,el.dataset.id);if(!d)return;
+    const ps=ENGINE.debtPayStats(d);if(!ps.avgMo)return toast('No matched repayments to apply');
+    const f={weekly:52/12,fortnightly:26/12,monthly:1}[d.minFreq||'monthly']||1;
+    d.minAmount=Math.round(ps.avgMo/f);
+    if(ENGINE.syncDebtBills)ENGINE.syncDebtBills();
+    save();render();
+    toast(`${d.name} minimum set to ${fmt(ps.avgMo)}/mo from actuals${d.viaBills?' - AUTO bill updated':''}`);
   },
   'bill-cat-period':el=>{ui.billCatPeriod=el.dataset.p;render()},
   'living-proj-mode':el=>{ui.livingProjMode=el.dataset.m;render()},
@@ -3865,6 +3948,7 @@ const CHANGES={
   'acct-sort':el=>{ui.acctSort=el.value;render()},
   'acct-group':el=>{ui.acctGroup=el.value;render()},
   'text-scale':el=>{state.settings.textScale=+el.value;applyTextScale();save()},
+  'drift-pc':el=>{state.settings.driftPc=clamp(parseInt(el.value)||10,1,90);save();render()},
   'set-apikey':el=>{state.settings.apiKey=el.value.trim();save();render()},
   'pair-token':el=>{ui.pairToken=el.checked;const b=$('#modal-layer .modal-b');if(b&&ui._pairBody)b.innerHTML=ui._pairBody()},
   'backup-cadence':el=>{state.settings.backupCadence=el.value;state.settings.backupSnooze='';save();render()},
@@ -4774,6 +4858,7 @@ function loadSample(){
   state.settings.alloc=Object.assign({debt:70,goals:20,keep:10},state.settings.alloc||{});
   if(!state.settings.spendMode)state.settings.spendMode='auto';
   if(!state.settings.spendMonths)state.settings.spendMonths=3;
+  if(!state.settings.driftPc)state.settings.driftPc=10;
   state.consol=Object.assign({debtIds:[],rate:9,years:5,fees:0},state.consol||{});
   if(!Array.isArray(state.incomes))state.incomes=[];
   if(!Array.isArray(state.backupLog))state.backupLog=[];
